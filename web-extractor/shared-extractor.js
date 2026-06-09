@@ -561,20 +561,195 @@ window._WE.DEBUG = false;
   };
 
   // ================================================================
-  // 增强版提取：等待 + SSR + 快照
+  // 扁平数据提取（全页面或指定根元素）
   // ================================================================
 
-  WE.extractWithWait = async function(maxLength, waitTimeout) {
+  /** 从整个页面提取价格/数据项列表 */
+  WE.extractFlatDataSection = function(roots) {
+    var lines = [];
+    var MAX_ITEMS = 40;
+    var count = 0;
+    try {
+      var pp = /[¥￥$€£]\s*\d[\d,.]*|(\d[\d,.]*)\s*(起|元|晚|起\/晚|元起|元\/晚)/;
+      var candidates = [];
+
+      // 如果指定了根元素，仅在根内扫描；否则扫描全页
+      var rootsToScan = (roots && roots.length > 0) ? roots : [document.body];
+      var candidateSet = {};
+
+      for (var ri = 0; ri < rootsToScan.length; ri++) {
+        if (!rootsToScan[ri]) continue;
+        var allEls = rootsToScan[ri].querySelectorAll("div, h3, h4, p, span, li, dt, dd, td, th");
+        for (var ei = 0; ei < allEls.length; ei++) {
+          var el = allEls[ei];
+          if (!WE.isElementVisible(el)) continue;
+          var txt = (el.textContent || "").replace(/\s+/g, " ").trim();
+          if (txt.length < 8 || txt.length > 300) continue;
+          // 用元素引用去重
+          var key = txt.substring(0, 50);
+          if (!candidateSet[key]) {
+            candidateSet[key] = true;
+            candidates.push({ el: el, text: txt });
+          }
+        }
+      }
+
+      for (var ci = 0; ci < candidates.length && count < MAX_ITEMS; ci++) {
+        var c = candidates[ci];
+        if (!pp.test(c.text)) continue;
+        var label = "";
+        var cel = c.el;
+        var prev = cel.previousElementSibling;
+        for (var pi = 0; pi < 3 && prev; pi++) {
+          var pTag = prev.tagName.toLowerCase();
+          var pText = (prev.textContent || "").replace(/\s+/g, " ").trim();
+          if (pTag.match(/^h[1-6]$/) && pText.length > 0) { label = pText; break; }
+          if (pText.length > 0 && pText.length <= 100 && !pp.test(pText)) { label = pText; break; }
+          prev = prev.previousElementSibling;
+        }
+        if (!label && cel.parentElement) {
+          var dt = "";
+          for (var j = 0; j < cel.parentElement.childNodes.length; j++) {
+            if (cel.parentElement.childNodes[j] === cel) break;
+            if (cel.parentElement.childNodes[j].nodeType === 3) dt += cel.parentElement.childNodes[j].textContent;
+          }
+          dt = dt.replace(/\s+/g, " ").trim();
+          if (dt.length > 0 && dt.length <= 100) label = dt;
+        }
+        var item = "  [" + (count + 1) + "]";
+        if (label) item += ' label: "' + WE.esc(label, 300) + '"';
+        item += ' data: "' + WE.esc(c.text, 600) + '"';
+        lines.push(item);
+        count++;
+      }
+    } catch(e) {}
+    return lines.join("\n");
+  };
+
+  // ================================================================
+  // 指定根元素的可访问性树快照
+  // ================================================================
+
+  /** 为指定的 DOM 根元素集合构建可访问性树 */
+  WE.buildAccessibilityTreeForRoots = function(roots, maxLength) {
+    var SKIP_TAGS = { script:1, style:1, svg:1, noscript:1, iframe:1, canvas:1, video:1, audio:1, template:1, link:1, meta:1, br:1, hr:1, wbr:1 };
+    var LEAF_TAGS = { button:1, input:1, textarea:1, select:1, img:1, label:1 };
+
+    var lines = [];
+    var total = 0;
+    var HIT_LIMIT = false;
+
+    function emit(depth, text) {
+      if (HIT_LIMIT) return false;
+      var line = WE.sp(depth) + text;
+      if (total + line.length + 1 > maxLength) { HIT_LIMIT = true; return false; }
+      lines.push(line);
+      total += line.length + 1;
+      return true;
+    }
+
+    function walk(node, depth) {
+      if (HIT_LIMIT || depth > 12) return;
+      if (node.nodeType === 3) {
+        var t = node.textContent.replace(/\s+/g, " ").trim();
+        if (t) emit(depth, 'text "' + WE.esc(t, 500) + '"');
+        return;
+      }
+      if (node.nodeType !== 1) return;
+      if (!WE.isVisible(node)) return;
+      var tag = node.tagName.toLowerCase();
+      if (SKIP_TAGS.hasOwnProperty(tag)) return;
+
+      var role = WE.roleOf(node);
+      var isLeaf = LEAF_TAGS.hasOwnProperty(tag);
+      var hasVisChildren = false;
+      if (!isLeaf) {
+        for (var i = 0; i < node.children.length; i++) {
+          var c = node.children[i];
+          if (WE.isVisible(c) && !SKIP_TAGS.hasOwnProperty(c.tagName.toLowerCase())) {
+            hasVisChildren = true;
+            break;
+          }
+        }
+      }
+
+      if (!hasVisChildren || isLeaf) {
+        var text = "", href = "";
+        if (tag === "img") {
+          text = (node.getAttribute("alt") || node.getAttribute("title") || "").trim();
+        } else if (tag === "a") {
+          text = WE.directText(node);
+          href = WE.linkHref(node);
+        } else if (tag === "input") {
+          text = (node.getAttribute("placeholder") || node.getAttribute("value") || node.getAttribute("name") || "").trim();
+        } else {
+          text = WE.directText(node);
+        }
+        if (text) {
+          if (!role) role = "text";
+          var line = role;
+          if (tag === "a" && href) {
+            line += ' "' + WE.esc(text, 200) + '" [' + WE.esc(href, 500) + ']';
+          } else {
+            line += ' "' + WE.esc(text, 200) + '"';
+          }
+          emit(depth, line);
+        }
+      } else {
+        if (!role) role = "group";
+        if (!emit(depth, role)) return;
+        for (var i = 0; i < node.childNodes.length; i++) {
+          walk(node.childNodes[i], depth + 1);
+          if (HIT_LIMIT) return;
+        }
+      }
+    }
+
+    for (var ri = 0; ri < roots.length; ri++) {
+      if (ri > 0) emit(0, "---");
+      walk(roots[ri], 1);
+      if (HIT_LIMIT) break;
+    }
+
+    var snap = lines.join("\n");
+    if (HIT_LIMIT) snap += "\n... (snapshot truncated at length limit)";
+    return snap;
+  };
+
+  // ================================================================
+  // 增强版提取：等待 + SSR + 快照 + 扁平数据
+  // ================================================================
+
+  WE.extractWithWait = async function(maxLength, waitTimeout, selectedEls) {
     maxLength = maxLength || 50000;
     waitTimeout = waitTimeout || 15000;
+    var isSelectedMode = selectedEls && selectedEls.length > 0;
 
-    var waitResult = await WE.waitForDynamicContent(waitTimeout);
-    var ssrDataSection = WE.extractSSRDataSection();
+    var waitResult;
+    if (isSelectedMode) {
+      waitResult = { ready: true, waited: 0, dataSources: ["user_selected_elements"], reason: "user_selected" };
+    } else {
+      waitResult = await WE.waitForDynamicContent(waitTimeout);
+    }
 
-    var remainingForSnapshot = maxLength - ssrDataSection.length - 200;
+    var ssrDataSection = isSelectedMode ? "" : WE.extractSSRDataSection();
+
+    var remainingForSnapshot = maxLength - ssrDataSection.length - 500;
     if (remainingForSnapshot < 5000) remainingForSnapshot = 5000;
 
-    var snapshot = WE.extractStructuredContent(remainingForSnapshot);
+    var snapshot;
+    if (isSelectedMode) {
+      snapshot = WE.buildAccessibilityTreeForRoots(selectedEls, remainingForSnapshot);
+    } else {
+      snapshot = WE.extractStructuredContent(remainingForSnapshot);
+    }
+
+    var flatDataSection;
+    if (isSelectedMode) {
+      flatDataSection = WE.extractFlatDataSection(selectedEls);
+    } else {
+      flatDataSection = WE.extractFlatDataSection();
+    }
 
     var combined = "";
     combined += "=== Page Metadata ===\n";
@@ -584,10 +759,16 @@ window._WE.DEBUG = false;
     if (waitResult.dataSources.length > 0) {
       combined += "data_sources: " + waitResult.dataSources.slice(0, 10).join(", ") + "\n";
     }
+    if (isSelectedMode) combined += "selected_mode: true (" + selectedEls.length + " user-selected elements)\n";
     combined += "\n";
 
     if (ssrDataSection.trim().length > 0) {
       combined += ssrDataSection + "\n";
+    }
+    if (flatDataSection.trim().length > 0) {
+      combined += "=== Flat Data List (key data items with prices) ===\n";
+      combined += "format: [N] label: \"...\" data: \"...\"\n";
+      combined += flatDataSection + "\n\n";
     }
     combined += "=== Accessibility Tree Snapshot ===\n";
     combined += snapshot;

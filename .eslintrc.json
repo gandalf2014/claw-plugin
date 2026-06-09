@@ -1,0 +1,40 @@
+{
+  "env": {
+    "browser": true,
+    "node": true,
+    "es2020": true,
+    "webextensions": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2020
+  },
+  "extends": ["eslint:recommended"],
+  "rules": {
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^(DOM|_)$" }],
+    "no-undef": "warn",
+    "no-redeclare": "warn",
+    "no-empty": ["warn", { "allowEmptyCatch": true }],
+    "no-constant-condition": "warn",
+    "no-prototype-builtins": "off",
+    "no-cond-assign": "warn",
+    "no-inner-declarations": "off"
+  },
+  "ignorePatterns": [
+    "node_modules/",
+    "*.min.js"
+  ],
+  "overrides": [
+    {
+      "files": ["tests/**/*.js"],
+      "env": {
+        "node": true,
+        "browser": false,
+        "es2020": true,
+        "mocha": true
+      },
+      "rules": {
+        "no-undef": "off"
+      }
+    }
+  ]
+}

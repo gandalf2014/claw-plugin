@@ -20,8 +20,8 @@ function loadModule(filename, sandboxOverrides = {}) {
 
   // vm.runInContext 中 const/let 声明的变量不会出现在 context 对象上，
   // 因此将顶层 const/let 替换为 var，使它们成为 context 的属性。
-  // 简单策略：只处理行首或分号/右大括号后的 const/let 声明
-  code = code.replace(/(^|[;\{\}])\s*(const|let)\s+/gm, '$1 var ');
+  // 使用单词边界确保精确匹配，排除字符串内的 false positive
+  code = code.replace(/(^|[;\{\}])\s*\b(const|let)\b\s+/gm, '$1 var ');
 
   const sandbox = {
     // 模拟 chrome 扩展 API

@@ -99,9 +99,9 @@ test.describe('crc32', () => {
 
 // ---- jsonToXlsxBlob ----
 test.describe('jsonToXlsxBlob', () => {
-  test('简单对象数组生成 XLSX Blob', () => {
+  test('简单对象数组生成 XLSX Blob', async () => {
     const { jsonToXlsxBlob } = mods;
-    const blob = jsonToXlsxBlob(JSON.stringify([
+    const blob = await jsonToXlsxBlob(JSON.stringify([
       { name: 'Alice', score: 95 },
       { name: 'Bob', score: 87 },
     ]));
@@ -111,19 +111,29 @@ test.describe('jsonToXlsxBlob', () => {
     expect(blob.size).toBeGreaterThan(100);
   });
 
-  test('无效 JSON 抛出错误', () => {
+  test('无效 JSON 抛出错误', async () => {
     const { jsonToXlsxBlob } = mods;
-    expect(() => jsonToXlsxBlob('bad json')).toThrow('JSON 解析失败');
+    try {
+      await jsonToXlsxBlob('bad json');
+      expect(true).toBe(false); // 不应到达这里
+    } catch (e) {
+      expect(e.message).toContain('JSON 解析失败');
+    }
   });
 
-  test('空数组抛出错误', () => {
+  test('空数组抛出错误', async () => {
     const { jsonToXlsxBlob } = mods;
-    expect(() => jsonToXlsxBlob('[]')).toThrow('无可转换为表格的数据');
+    try {
+      await jsonToXlsxBlob('[]');
+      expect(true).toBe(false); // 不应到达这里
+    } catch (e) {
+      expect(e.message).toContain('无可转换为表格的数据');
+    }
   });
 
-  test('含包装对象的数据', () => {
+  test('含包装对象的数据', async () => {
     const { jsonToXlsxBlob } = mods;
-    const blob = jsonToXlsxBlob(JSON.stringify({
+    const blob = await jsonToXlsxBlob(JSON.stringify({
       results: [{ title: 'Test', value: 1 }],
     }));
     expect(blob).toBeTruthy();

@@ -5,8 +5,8 @@
 // 自动降级为 STORE（无压缩）以保证兼容性。
 // ============================================================
 
-/** JSON 文本 → XLSX Blob */
-function jsonToXlsxBlob(jsonText) {
+/** JSON 文本 → XLSX Blob（异步，支持压缩） */
+async function jsonToXlsxBlob(jsonText) {
   var data;
   try {
     data = JSON.parse(jsonText);
@@ -119,7 +119,7 @@ function jsonToXlsxBlob(jsonText) {
     { name: "xl/sharedStrings.xml", data: sstXml },
   ];
 
-  return buildZip(zipFiles);
+  return await buildZip(zipFiles);
 }
 
 // ================================================================
@@ -131,6 +131,7 @@ function supportsCompressionStream() {
   return typeof CompressionStream !== "undefined";
 }
 
+/** 压缩数据（异步），失败或不可用时返回 null */
 async function compressData(data) {
   if (!supportsCompressionStream()) return null;
   try {
@@ -140,8 +141,9 @@ async function compressData(data) {
     writer.write(data);
     writer.close();
     var chunks = [];
-    var result;
-    while (!(result = await reader.read())) {
+    while (true) {
+      var result = await reader.read();
+      if (result.done) break;
       if (result.value) chunks.push(result.value);
     }
     var totalLen = 0;
@@ -158,12 +160,25 @@ async function compressData(data) {
   }
 }
 
-/** 构建 ZIP 文件（同步，在 Blob 构建前完成压缩） */
-function buildZip(files) {
+/** 将多个 Uint8Array 合并为一个 */
+function concatByteArrays(arrays) {
+  var totalLen = 0;
+  for (var i = 0; i < arrays.length; i++) totalLen += arrays[i].length;
+  var result = new Uint8Array(totalLen);
+  var off = 0;
+  for (var i = 0; i < arrays.length; i++) {
+    result.set(arrays[i], off);
+    off += arrays[i].length;
+  }
+  return result;
+}
+
+/** 构建 ZIP 文件（异步，支持 Deflate 压缩） */
+async function buildZip(files) {
   var encoder = new TextEncoder();
   var fileData = [];
 
-  // 编码所有文件
+  // 编码所有文件并并发压缩
   for (var i = 0; i < files.length; i++) {
     var nameBytes = encoder.encode(files[i].name);
     var rawData = encoder.encode(files[i].data);
@@ -171,55 +186,79 @@ function buildZip(files) {
       name: files[i].name,
       nameBytes: nameBytes,
       rawData: rawData,
-      compressedData: null,    // 待压缩填充
+      compressedData: null,
       compression: 0,          // 0=STORE, 8=Deflate
     });
   }
 
-  // 预分配缓冲区（先按 STORE 方法估算，后续调整）
-  var totalSize = 0;
+  // 异步压缩大文件（并行）
+  var compressPromises = [];
   for (var j = 0; j < fileData.length; j++) {
-    totalSize += 30 + fileData[j].nameBytes.length + fileData[j].rawData.length;
-    totalSize += 46 + fileData[j].nameBytes.length;
+    if (fileData[j].rawData.length > 300) {
+      compressPromises.push(
+        compressData(fileData[j].rawData).then(function(fd, comp) {
+          return function(cdata) { fd.compressedData = cdata; };
+        }(fileData[j]))
+      );
+    }
   }
-  totalSize += 22;
 
-  var buf = new ArrayBuffer(totalSize);
-  var view = new DataView(buf);
-  var offset = 0;
-  var centralEntries = [];
+  if (compressPromises.length > 0) {
+    try {
+      await Promise.all(compressPromises);
+    } catch(e) {
+      // 压缩失败时静默降级
+    }
+  }
 
+  // 确定每个文件的压缩状态并计算压缩版本
   for (var k = 0; k < fileData.length; k++) {
     var fd = fileData[k];
+    // 只有压缩后确实变小了才使用压缩版本
+    if (fd.compressedData && fd.compressedData.length < fd.rawData.length) {
+      fd.compression = 8;
+    } else {
+      fd.compressedData = null;
+      fd.compression = 0;
+    }
+  }
 
-    // 尝试压缩（小文件 < 300 字节直接 STORE）
-    var useCompressed = fd.rawData.length > 300 ? fd.compressedData : null;
-    if (!useCompressed) fd.compression = 0;
+  // 构建 ZIP 分段（使用动态数组避免预分配缓冲区问题）
+  var parts = [];
+  var centralEntries = [];
+  var localOffsets = [];
 
+  for (var m = 0; m < fileData.length; m++) {
+    var fd = fileData[m];
+    var useCompressed = fd.compression === 8 ? fd.compressedData : null;
     var dataToWrite = useCompressed || fd.rawData;
-    var crc = crc32(fd.rawData);  // CRC 基于原始未压缩数据
+    var crc = crc32(fd.rawData);
 
-    var localOffset = offset;
+    // 计算本次写入前的偏移量
+    var localOffset = 0;
+    for (var pi = 0; pi < parts.length; pi++) localOffset += parts[pi].length;
+    localOffsets.push(localOffset);
 
-    // Local file header
-    view.setUint32(offset, 0x04034b50, true); offset += 4;
-    view.setUint16(offset, 20, true); offset += 2;
-    view.setUint16(offset, useCompressed ? 0x0800 : 0, true); offset += 2;  // bit 3: 有 Data Descriptor
-    view.setUint16(offset, fd.compression, true); offset += 2;
-    view.setUint16(offset, 0, true); offset += 2;
-    view.setUint16(offset, 0, true); offset += 2;
-    view.setUint32(offset, crc, true); offset += 4;
-    view.setUint32(offset, dataToWrite.length, true); offset += 4;
-    view.setUint32(offset, fd.rawData.length, true); offset += 4;
-    view.setUint16(offset, fd.nameBytes.length, true); offset += 2;
-    view.setUint16(offset, 0, true); offset += 2;
-
+    // 构建 Local File Header
+    var lfh = new ArrayBuffer(30 + fd.nameBytes.length);
+    var lfhView = new DataView(lfh);
+    var lfhOff = 0;
+    lfhView.setUint32(lfhOff, 0x04034b50, true); lfhOff += 4;
+    lfhView.setUint16(lfhOff, 20, true); lfhOff += 2;
+    lfhView.setUint16(lfhOff, useCompressed ? 0x0800 : 0, true); lfhOff += 2;
+    lfhView.setUint16(lfhOff, fd.compression, true); lfhOff += 2;
+    lfhView.setUint16(lfhOff, 0, true); lfhOff += 2;
+    lfhView.setUint16(lfhOff, 0, true); lfhOff += 2;
+    lfhView.setUint32(lfhOff, crc, true); lfhOff += 4;
+    lfhView.setUint32(lfhOff, dataToWrite.length, true); lfhOff += 4;
+    lfhView.setUint32(lfhOff, fd.rawData.length, true); lfhOff += 4;
+    lfhView.setUint16(lfhOff, fd.nameBytes.length, true); lfhOff += 2;
+    lfhView.setUint16(lfhOff, 0, true); lfhOff += 2;
     for (var fn = 0; fn < fd.nameBytes.length; fn++) {
-      view.setUint8(offset++, fd.nameBytes[fn]);
+      lfhView.setUint8(lfhOff++, fd.nameBytes[fn]);
     }
-    for (var dd = 0; dd < dataToWrite.length; dd++) {
-      view.setUint8(offset++, dataToWrite[dd]);
-    }
+    parts.push(new Uint8Array(lfh));
+    parts.push(dataToWrite);
 
     centralEntries.push({
       nameBytes: fd.nameBytes,
@@ -231,45 +270,58 @@ function buildZip(files) {
     });
   }
 
-  var cdStart = offset;
-
+  // 构建 Central Directory
+  var cdParts = [];
   for (var ck = 0; ck < centralEntries.length; ck++) {
     var ce = centralEntries[ck];
-    view.setUint32(offset, 0x02014b50, true); offset += 4;
-    view.setUint16(offset, 20, true); offset += 2;
-    view.setUint16(offset, 20, true); offset += 2;
-    view.setUint16(offset, 0, true); offset += 2;
-    view.setUint16(offset, ce.compression, true); offset += 2;
-    view.setUint16(offset, 0, true); offset += 2;
-    view.setUint16(offset, 0, true); offset += 2;
-    view.setUint32(offset, ce.crc, true); offset += 4;
-    view.setUint32(offset, ce.compressedSize, true); offset += 4;
-    view.setUint32(offset, ce.uncompressedSize, true); offset += 4;
-    view.setUint16(offset, ce.nameBytes.length, true); offset += 2;
-    view.setUint16(offset, 0, true); offset += 2;
-    view.setUint16(offset, 0, true); offset += 2;
-    view.setUint16(offset, 0, true); offset += 2;
-    view.setUint16(offset, 0, true); offset += 2;
-    view.setUint32(offset, 0, true); offset += 4;
-    view.setUint32(offset, ce.localOffset, true); offset += 4;
-
+    var cd = new ArrayBuffer(46 + ce.nameBytes.length);
+    var cdView = new DataView(cd);
+    var cdOff = 0;
+    cdView.setUint32(cdOff, 0x02014b50, true); cdOff += 4;
+    cdView.setUint16(cdOff, 20, true); cdOff += 2;
+    cdView.setUint16(cdOff, 20, true); cdOff += 2;
+    cdView.setUint16(cdOff, 0, true); cdOff += 2;
+    cdView.setUint16(cdOff, ce.compression, true); cdOff += 2;
+    cdView.setUint16(cdOff, 0, true); cdOff += 2;
+    cdView.setUint16(cdOff, 0, true); cdOff += 2;
+    cdView.setUint32(cdOff, ce.crc, true); cdOff += 4;
+    cdView.setUint32(cdOff, ce.compressedSize, true); cdOff += 4;
+    cdView.setUint32(cdOff, ce.uncompressedSize, true); cdOff += 4;
+    cdView.setUint16(cdOff, ce.nameBytes.length, true); cdOff += 2;
+    cdView.setUint16(cdOff, 0, true); cdOff += 2;
+    cdView.setUint16(cdOff, 0, true); cdOff += 2;
+    cdView.setUint16(cdOff, 0, true); cdOff += 2;
+    cdView.setUint16(cdOff, 0, true); cdOff += 2;
+    cdView.setUint32(cdOff, 0, true); cdOff += 4;
+    cdView.setUint32(cdOff, ce.localOffset, true); cdOff += 4;
     for (var fn2 = 0; fn2 < ce.nameBytes.length; fn2++) {
-      view.setUint8(offset++, ce.nameBytes[fn2]);
+      cdView.setUint8(cdOff++, ce.nameBytes[fn2]);
     }
+    cdParts.push(new Uint8Array(cd));
   }
 
-  var cdSize = offset - cdStart;
+  var cdAll = concatByteArrays(cdParts);
+  var cdStart = 0;
+  for (var pi2 = 0; pi2 < parts.length; pi2++) cdStart += parts[pi2].length;
 
-  view.setUint32(offset, 0x06054b50, true); offset += 4;
-  view.setUint16(offset, 0, true); offset += 2;
-  view.setUint16(offset, 0, true); offset += 2;
-  view.setUint16(offset, centralEntries.length, true); offset += 2;
-  view.setUint16(offset, centralEntries.length, true); offset += 2;
-  view.setUint32(offset, cdSize, true); offset += 4;
-  view.setUint32(offset, cdStart, true); offset += 4;
-  view.setUint16(offset, 0, true); offset += 2;
+  // End of Central Directory Record
+  var eocd = new ArrayBuffer(22);
+  var eocdView = new DataView(eocd);
+  var eocdOff = 0;
+  eocdView.setUint32(eocdOff, 0x06054b50, true); eocdOff += 4;
+  eocdView.setUint16(eocdOff, 0, true); eocdOff += 2;
+  eocdView.setUint16(eocdOff, 0, true); eocdOff += 2;
+  eocdView.setUint16(eocdOff, centralEntries.length, true); eocdOff += 2;
+  eocdView.setUint16(eocdOff, centralEntries.length, true); eocdOff += 2;
+  eocdView.setUint32(eocdOff, cdAll.length, true); eocdOff += 4;
+  eocdView.setUint32(eocdOff, cdStart, true); eocdOff += 4;
+  eocdView.setUint16(eocdOff, 0, true); eocdOff += 2;
 
-  return new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+  // 合并所有部分
+  var allParts = parts.concat([cdAll, new Uint8Array(eocd)]);
+  var finalBuf = concatByteArrays(allParts);
+
+  return new Blob([finalBuf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
 }
 
 // ---- CRC32 ----

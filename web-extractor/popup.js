@@ -450,6 +450,12 @@ async function handleExtract() {
   DOM.btnExtract.disabled = true;
   DOM.btnScrollHint.classList.remove("hidden");
 
+  // 建立 keepalive 连接，防止 Service Worker 在长时间 LLM 调用期间被终止
+  var keepAlivePort = chrome.runtime.connect({ name: "keepalive" });
+  keepAlivePort.onMessage.addListener(function(msg) {
+    // 心跳响应，无需处理
+  });
+
   try {
     setStatus("正在读取配置...", "info");
     const config = await getConfig();
@@ -498,6 +504,8 @@ async function handleExtract() {
     showError("提取失败：" + err.message);
     setStatus("提取失败", "error");
   } finally {
+    // 断开 keepalive 连接
+    try { keepAlivePort.disconnect(); } catch(e) {}
     DOM.btnExtract.disabled = false;
     DOM.btnScrollHint.classList.add("hidden");
     setTimeout(() => { hideStatus(); hideProgress(); }, 3000);
@@ -527,24 +535,15 @@ async function getMaxContentLength() {
   });
 }
 
-// ---- 提取页面内容（注入 shared-extractor.js + extractContentFromDOM） ----
+// ---- 提取页面内容（shared-extractor.js 已由 content_scripts 注入） ----
 async function extractPageContent(maxLength) {
   return new Promise((resolve, reject) => {
-    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs || tabs.length === 0) return reject(new Error("无法获取当前标签页"));
       const tabId = tabs[0].id;
 
-      // Step 1: 注入 shared-extractor.js
-      try {
-        await chrome.scripting.executeScript({
-          target: { tabId },
-          files: ["shared-extractor.js"],
-        });
-      } catch (e) {
-        return reject(new Error("注入 shared-extractor.js 失败: " + e.message));
-      }
-
-      // Step 2: 注入提取函数（引用 window._WE）
+      // shared-extractor.js 已通过 manifest content_scripts 在 document_idle 时注入，
+      // window._WE 已可用，直接执行提取函数即可
       chrome.scripting.executeScript({
         target: { tabId },
         func: extractContentFromDOM,
@@ -561,255 +560,25 @@ async function extractPageContent(maxLength) {
 // ================================================================
 // 注入函数：extractContentFromDOM
 // 依赖 window._WE（shared-extractor.js 已预先注入）
+// 委托所有提取逻辑到 shared-extractor，消除代码重复
 // ================================================================
 
 async function extractContentFromDOM(maxLength) {
   var WE = window._WE;
-  var SEL_ATTR = 'data-we-selected';
 
-  // ---- 检测选中元素 ----
+  // 检测选中元素
   var selectedEls = [];
-  var selectedOnly = false;
   try {
-    var allSel = document.querySelectorAll('[' + SEL_ATTR + '="true"]');
+    var allSel = document.querySelectorAll('[data-we-selected="true"]');
     if (allSel.length > 0) {
-      selectedOnly = true;
       for (var si = 0; si < allSel.length; si++) {
         if (WE.isElementVisible(allSel[si])) selectedEls.push(allSel[si]);
       }
     }
   } catch(e) {}
 
-  // ---- 选中模式下的受限扫描 ----
-  function $scanDataInRoots(roots) {
-    var lines = []; var MAX_ITEMS = 40; var count = 0;
-    var pp = /[¥￥$€£]\s*\d[\d,.]*|(\d[\d,.]*)\s*(起|元|晚|起\/晚|元起|元\/晚)/;
-    for (var ri = 0; ri < roots.length && count < MAX_ITEMS; ri++) {
-      try {
-        var allEls = roots[ri].querySelectorAll("div, h3, h4, p, span, li, dt, dd, td, th");
-        var cands = [];
-        for (var ei = 0; ei < allEls.length; ei++) {
-          var el = allEls[ei];
-          if (!WE.isElementVisible(el)) continue;
-          var txt = (el.textContent || "").replace(/\s+/g, " ").trim();
-          if (txt.length < 8 || txt.length > 300) continue;
-          cands.push({ el: el, text: txt });
-        }
-        for (var ci = 0; ci < cands.length && count < MAX_ITEMS; ci++) {
-          var c = cands[ci];
-          if (!pp.test(c.text)) continue;
-          var label = "";
-          var cel = c.el;
-          var prev = cel.previousElementSibling;
-          for (var pi = 0; pi < 3 && prev; pi++) {
-            var pTag = prev.tagName.toLowerCase();
-            var pText = (prev.textContent || "").replace(/\s+/g, " ").trim();
-            if (pTag.match(/^h[1-6]$/) && pText.length > 0) { label = pText; break; }
-            if (pText.length > 0 && pText.length <= 100 && !pp.test(pText)) { label = pText; break; }
-            prev = prev.previousElementSibling;
-          }
-          var item = "  [" + (count + 1) + "]";
-          if (label) item += ' label: "' + WE.esc(label, 300) + '"';
-          item += ' data: "' + WE.esc(c.text, 600) + '"';
-          lines.push(item); count++;
-        }
-      } catch(e) {}
-    }
-    return lines.join("\n");
-  }
-
-  // ---- 受限树遍历（选中元素） ----
-  function $walkRoots(roots, remaining) {
-    var T_LANDMARK = { header:"banner", main:"main", nav:"navigation", footer:"contentinfo", aside:"complementary", form:"form" };
-    var T_SKIP = { script:1, style:1, svg:1, noscript:1, iframe:1, canvas:1, video:1, audio:1, template:1, link:1, meta:1, br:1, hr:1, wbr:1 };
-    var T_LEAF = { button:1, input:1, textarea:1, select:1, img:1, label:1 };
-    var tLines = []; var tTotal = 0; var hit = false;
-
-    function tSp(n) { var s = ""; for (var j = 0; j < n; j++) s += "  "; return s; }
-    function tEmit(depth, text) { if (hit) return false; var line = tSp(depth) + text; if (tTotal + line.length + 1 > remaining) { hit = true; return false; } tLines.push(line); tTotal += line.length + 1; return true; }
-    function tVis(el) {
-      if (!el || el.nodeType !== 1) return false; var s = getComputedStyle(el);
-      if (s.display === "none" || s.visibility === "hidden" || s.opacity === "0") return false;
-      if (el !== document.body && el.offsetWidth === 0 && el.offsetHeight === 0) return false;
-      if (el.getAttribute("aria-hidden") === "true") return false; if (el.hasAttribute("hidden")) return false; return true;
-    }
-    function tRoleOf(el) {
-      var tag = el.tagName.toLowerCase(); var ex = el.getAttribute("role"); if (ex) return ex;
-      if (T_LANDMARK.hasOwnProperty(tag)) return T_LANDMARK[tag];
-      var h = tag.match(/^h([1-6])$/); if (h) return "heading [h" + h[1] + "]";
-      switch (tag) { case "a":return "link"; case "ul":case "ol":return "list"; case "li":return "listitem"; case "button":return "button"; case "table":return "table"; case "tr":return "row"; case "td":return "cell"; case "th":return "cell [th]"; case "img":return "image"; case "input":return "textbox"; case "textarea":return "textbox"; case "select":return "combobox"; case "p":return "paragraph"; case "label":return "label"; default:return ""; }
-    }
-    function tDirTxt(el) { var t = ""; for (var i = 0; i < el.childNodes.length; i++) { if (el.childNodes[i].nodeType === 3) t += el.childNodes[i].textContent; } return t.replace(/\s+/g, " ").trim(); }
-    function tEsc(s, lim) { if (!s) return ""; lim = lim || 500; s = s.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\t/g, "\\t"); if (s.length > lim) s = s.substring(0, lim - 3) + "..."; return s; }
-    function tLnk(el) { var h = (el.getAttribute("href") || "").trim(); if (!h || h.toLowerCase().startsWith("javascript:")) return ""; if (h.length > 500) h = h.substring(0, 497) + "..."; return h; }
-
-    function tWalk(node, depth) {
-      if (hit || depth > 12) return;
-      if (node.nodeType === 3) { var t = node.textContent.replace(/\s+/g, " ").trim(); if (t) tEmit(depth, 'text "' + tEsc(t) + '"'); return; }
-      if (node.nodeType !== 1) return; if (!tVis(node)) return;
-      var tag = node.tagName.toLowerCase(); if (T_SKIP.hasOwnProperty(tag)) return;
-      var role = tRoleOf(node); var isLeaf = T_LEAF.hasOwnProperty(tag);
-      var hasVisKids = false;
-      if (!isLeaf) { for (var i = 0; i < node.children.length; i++) { var c = node.children[i]; if (tVis(c) && !T_SKIP.hasOwnProperty(c.tagName.toLowerCase())) { hasVisKids = true; break; } } }
-      if (!hasVisKids || isLeaf) {
-        var text = "", href = "";
-        if (tag === "img") text = (node.getAttribute("alt") || node.getAttribute("title") || "").trim();
-        else if (tag === "a") { text = tDirTxt(node); href = tLnk(node); }
-        else if (tag === "input") text = (node.getAttribute("placeholder") || node.getAttribute("value") || node.getAttribute("name") || "").trim();
-        else text = tDirTxt(node);
-        if (text) { if (!role) role = "text"; var line = role; if (tag === "a" && href) line += ' "' + tEsc(text) + '" [' + tEsc(href, 500) + ']'; else line += ' "' + tEsc(text) + '"'; tEmit(depth, line); }
-      } else {
-        if (!role) role = "group"; if (!tEmit(depth, role)) return;
-        for (var i = 0; i < node.childNodes.length; i++) { tWalk(node.childNodes[i], depth + 1); if (hit) return; }
-      }
-    }
-    for (var ri = 0; ri < roots.length; ri++) {
-      if (ri > 0) tEmit(0, "---");
-      tWalk(roots[ri], 1);
-      if (hit) break;
-    }
-    var snap = tLines.join("\n");
-    if (hit) snap += "\n... (snapshot truncated at length limit)";
-    return snap;
-  }
-
-  // ---- 扁平数据提取 ----
-  function $extractFlatData() {
-    var lines = []; var MAX_ITEMS = 40; var count = 0;
-    try {
-      var pp = /[¥￥$€£]\s*\d[\d,.]*|(\d[\d,.]*)\s*(起|元|晚|起\/晚|元起|元\/晚)/;
-      var candidates = [];
-      var allEls = document.querySelectorAll("div, h3, h4, p, span, li, dt, dd, td, th");
-      for (var ei = 0; ei < allEls.length; ei++) {
-        var el = allEls[ei];
-        if (!WE.isElementVisible(el)) continue;
-        var txt = (el.textContent || "").replace(/\s+/g, " ").trim();
-        if (txt.length < 8 || txt.length > 300) continue;
-        candidates.push({ el: el, text: txt });
-      }
-      for (var ci = 0; ci < candidates.length && count < MAX_ITEMS; ci++) {
-        var c = candidates[ci];
-        if (!pp.test(c.text)) continue;
-        var label = "", cel = c.el;
-        var prev = cel.previousElementSibling;
-        for (var pi = 0; pi < 3 && prev; pi++) {
-          var pTag = prev.tagName.toLowerCase();
-          var pText = (prev.textContent || "").replace(/\s+/g, " ").trim();
-          if (pTag.match(/^h[1-6]$/) && pText.length > 0) { label = pText; break; }
-          if (pText.length > 0 && pText.length <= 100 && !pp.test(pText)) { label = pText; break; }
-          prev = prev.previousElementSibling;
-        }
-        if (!label && cel.parentElement) {
-          var dt = "";
-          for (var j = 0; j < cel.parentElement.childNodes.length; j++) {
-            if (cel.parentElement.childNodes[j] === cel) break;
-            if (cel.parentElement.childNodes[j].nodeType === 3) dt += cel.parentElement.childNodes[j].textContent;
-          }
-          dt = dt.replace(/\s+/g, " ").trim();
-          if (dt.length > 0 && dt.length <= 100) label = dt;
-        }
-        var item = "  [" + (count + 1) + "]";
-        if (label) item += ' label: "' + WE.esc(label, 300) + '"';
-        item += ' data: "' + WE.esc(c.text, 600) + '"';
-        lines.push(item); count++;
-      }
-    } catch(e) {}
-    return lines.join("\n");
-  }
-
-  // ================================================================
-  // Phase 0: 等待动态内容 / 选中模式跳过
-  // ================================================================
-  var waitResult;
-  if (selectedOnly) {
-    waitResult = { ready: true, waited: 0, dataSources: ["user_selected_elements"], reason: "user_selected" };
-  } else {
-    var qc = WE.quickContentCheck();
-    if (qc.ready) {
-      waitResult = { ready: true, waited: 0, dataSources: qc.sources, reason: "content_already_loaded" };
-    } else if (!WE.isDynamicPage()) {
-      waitResult = { ready: true, waited: 0, dataSources: [], reason: "static_page" };
-    } else {
-      var pendingRequests = 0, apiUrls = [];
-      var origFetch = null, origXOpen = null, origXSend = null;
-      try {
-        origFetch = window.fetch;
-        window.fetch = function() { pendingRequests++; var p = origFetch.apply(this, arguments); p.finally(function() { pendingRequests = Math.max(0, pendingRequests - 1); }); return p; };
-      } catch(e) {}
-      try {
-        origXOpen = XMLHttpRequest.prototype.open;
-        origXSend = XMLHttpRequest.prototype.send;
-        XMLHttpRequest.prototype.open = function(_m, url) { this.__xUrl = url; return origXOpen.apply(this, arguments); };
-        XMLHttpRequest.prototype.send = function() { var s = this; pendingRequests++; s.addEventListener("loadend", function() { pendingRequests = Math.max(0, pendingRequests - 1); if (s.__xUrl) apiUrls.push(s.__xUrl); }); return origXSend.apply(this, arguments); };
-      } catch(e) {}
-
-      var timeoutMs = 15000;
-      var startTime = Date.now();
-      var lastLen = 0, stableCount = 0;
-
-      while (Date.now() - startTime < timeoutMs) {
-        var ck = WE.quickContentCheck();
-        var curLen = document.body ? document.body.innerHTML.length : 0;
-        if (ck.ready) { WE.restoreNetworkMonitors(origFetch, origXOpen, origXSend); waitResult = { ready: true, waited: Date.now() - startTime, dataSources: ck.sources.concat(apiUrls), reason: "content_detected" }; break; }
-        if (curLen === lastLen) { stableCount++; if (stableCount >= 5 && pendingRequests === 0) { WE.restoreNetworkMonitors(origFetch, origXOpen, origXSend); waitResult = { ready: true, waited: Date.now() - startTime, dataSources: apiUrls, reason: "content_stable" }; break; } }
-        else { stableCount = 0; lastLen = curLen; }
-        await WE.sleep(400);
-      }
-      if (!waitResult) { WE.restoreNetworkMonitors(origFetch, origXOpen, origXSend); waitResult = { ready: true, waited: timeoutMs, dataSources: apiUrls, reason: "timeout" }; }
-    }
-  }
-
-  // ================================================================
-  // Phase 1: SSR 内嵌数据
-  // ================================================================
-  var ssrSection = "";
-  if (!selectedOnly) {
-    ssrSection = WE.extractSSRDataSection();
-  }
-
-  // ================================================================
-  // Phase 2: 快照
-  // ================================================================
-  var remaining = maxLength - ssrSection.length - 500;
-  if (remaining < 5000) remaining = 5000;
-
-  var snapshot = "";
-  if (selectedOnly && selectedEls.length > 0) {
-    try { snapshot = $walkRoots(selectedEls, remaining); } catch (e) { snapshot = "Snapshot error: " + e.message; }
-  } else {
-    snapshot = WE.extractStructuredContent(remaining);
-  }
-
-  // ================================================================
-  // Phase 2.5: 扁平数据列表
-  // ================================================================
-  var flatDataSection;
-  if (selectedOnly && selectedEls.length > 0) {
-    flatDataSection = $scanDataInRoots(selectedEls);
-  } else {
-    flatDataSection = $extractFlatData();
-  }
-
-  // ================================================================
-  // Phase 3: 组合输出
-  // ================================================================
-  var result = "";
-  result += "=== Page Metadata ===\n";
-  result += 'title: "' + (document.title || "") + '"\n';
-  result += 'url: "' + (window.location.href || "") + '"\n';
-  result += "wait_result: " + waitResult.reason + " (waited " + waitResult.waited + "ms)\n";
-  if (waitResult.dataSources.length > 0) result += "data_sources: " + waitResult.dataSources.slice(0, 10).join(", ") + "\n";
-  if (selectedOnly) result += "selected_mode: true (" + selectedEls.length + " user-selected elements)\n";
-  result += "\n";
-  if (ssrSection.trim().length > 0) result += ssrSection + "\n";
-  if (flatDataSection.trim().length > 0) {
-    result += "=== Flat Data List (key data items with prices) ===\n";
-    result += "format: [N] label: \"...\" data: \"...\"\n";
-    result += flatDataSection + "\n\n";
-  }
-  result += "=== Accessibility Tree Snapshot ===\n";
-  result += snapshot;
-  return result;
+  // 委托到 shared-extractor 的统一提取方法
+  return await WE.extractWithWait(maxLength, 15000, selectedEls.length > 0 ? selectedEls : null);
 }
 
 // ---- LLM 调用（通过 background） ----
@@ -833,10 +602,10 @@ async function callLLM(config, instruction, content, options) {
 // ---- JSON 格式化 ----
 function formatJSON(raw) {
   try {
-    let obj;
+    var obj;
     if (typeof raw === "string") {
-      let cleaned = raw.trim();
-      const mdMatch = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+      var cleaned = raw.trim();
+      var mdMatch = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
       if (mdMatch) cleaned = mdMatch[1].trim();
       obj = JSON.parse(cleaned);
     } else { obj = raw; }
@@ -871,7 +640,7 @@ function showCopyFeedback() {
 }
 
 // ---- 下载 ----
-function handleDownload() {
+async function handleDownload() {
   const text = DOM.jsonOutput.textContent;
   if (!text) return;
   const format = document.getElementById("selDownloadFormat").value;
@@ -880,14 +649,14 @@ function handleDownload() {
   const namePrefix = baseName + "-" + timestamp;
 
   try {
-    let blob, filename;
+    var blob, filename;
     switch (format) {
       case "csv":
         blob = new Blob(["\uFEFF" + jsonToCsv(text)], { type: "text/csv;charset=utf-8" });
         filename = namePrefix + ".csv";
         break;
       case "xlsx":
-        blob = jsonToXlsxBlob(text);
+        blob = await jsonToXlsxBlob(text);
         filename = namePrefix + ".xlsx";
         break;
       default:

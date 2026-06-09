@@ -3,7 +3,7 @@
 // ============================================================
 
 const HISTORY_KEY = "extractionHistory";
-const HISTORY_MAX = 50;
+var HISTORY_MAX = EXTRACTOR_CONSTANTS ? EXTRACTOR_CONSTANTS.MAX_HISTORY_ITEMS : 50;
 
 var historyItems = [];
 var historyOpen = false;
