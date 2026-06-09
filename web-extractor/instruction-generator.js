@@ -42,8 +42,9 @@ async function autoGenerateInstruction(elementTexts) {
     if (instruction && instruction.length > 5) {
       DOM.txtInstruction.value = instruction;
       instructionFromStorage = false;
-      setStatus("AI 已根据选中元素自动生成提取指令", "success");
-      setTimeout(hideStatus, 3000);
+      setStatus("AI 已根据选中元素自动生成提取指令，正在自动开始提取...", "success");
+      // 自动触发提取
+      setTimeout(function() { handleExtract(); }, 300);
     } else {
       fallbackGenerateInstruction(elementTexts);
     }
@@ -79,6 +80,7 @@ function fallbackGenerateInstruction(elementTexts) {
 
   DOM.txtInstruction.value = instruction;
   instructionFromStorage = false;
-  setStatus("已根据元素内容自动填写提取指令（可自行修改）", "info");
-  setTimeout(hideStatus, 3000);
+  setStatus("已根据元素内容自动填写提取指令，正在自动开始提取...", "info");
+  // 自动触发提取
+  setTimeout(function() { handleExtract(); }, 300);
 }

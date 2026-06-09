@@ -23,6 +23,7 @@ const DOM = {
   btnCopy:        document.getElementById("btnCopy"),
   btnDownload:    document.getElementById("btnDownload"),
   btnSaveRule:    document.getElementById("btnSaveRule"),
+  btnRetryNarrow: document.getElementById("btnRetryNarrow"),
   statusBar:      document.getElementById("statusBar"),
   statusText:     document.getElementById("statusText"),
   progressBar:    document.getElementById("progressBar"),
@@ -89,6 +90,16 @@ function bindEvents() {
   DOM.btnCopy.addEventListener("click", handleCopy);
   DOM.btnDownload.addEventListener("click", handleDownload);
 
+  DOM.btnRetryNarrow.addEventListener("click", handleRetryNarrow);
+
+  // 格式切换按钮组
+  document.getElementById("formatSwitcher").addEventListener("click", (e) => {
+    const btn = e.target.closest(".format-option");
+    if (!btn) return;
+    document.querySelectorAll("#formatSwitcher .format-option").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+  });
+
   DOM.btnSaveRule.addEventListener("click", () => {
     handleSaveRule(lastSavedInstruction, lastSavedSystemPrompt);
   });
@@ -126,9 +137,10 @@ async function loadMaxContentLength() {
 // ---- 状态管理 ----
 function setStatus(msg, type) {
   type = type || "info";
-  DOM.statusBar.classList.remove("hidden", "success", "error");
+  DOM.statusBar.classList.remove("hidden", "success", "error", "warning");
   if (type === "success") DOM.statusBar.classList.add("success");
   if (type === "error")   DOM.statusBar.classList.add("error");
+  if (type === "warning") DOM.statusBar.classList.add("warning");
   DOM.statusText.textContent = msg;
 }
 
@@ -438,6 +450,102 @@ function cleanupSelectionMode() {
 }
 
 // ================================================================
+// 空值率计算与自动重试
+// ================================================================
+
+// 自动重试状态
+let autoRetryCount = 0;
+const MAX_AUTO_RETRY = 3;
+const NULL_RATE_THRESHOLD = 0.3;
+
+/**
+ * 计算提取结果的空值率
+ * 遍历 JSON 结果中所有叶子值，统计空值（null、undefined、空字符串、"-")占比
+ */
+function calculateNullRate(jsonText) {
+  try {
+    var obj;
+    if (typeof jsonText === "string") {
+      var cleaned = jsonText.trim();
+      var mdMatch = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+      if (mdMatch) cleaned = mdMatch[1].trim();
+      obj = JSON.parse(cleaned);
+    } else {
+      obj = jsonText;
+    }
+    if (!obj) return 1;
+
+    var total = 0, nullCount = 0;
+
+    function walk(v) {
+      if (v === null || v === undefined) { total++; nullCount++; return; }
+      if (typeof v === "string") {
+        total++;
+        if (v.trim() === "" || v.trim() === "-" || v.trim() === "N/A" || v.trim() === "无" || v.trim() === "未知") nullCount++;
+        return;
+      }
+      if (typeof v === "number" || typeof v === "boolean") { total++; return; }
+      if (Array.isArray(v)) { for (var i = 0; i < v.length; i++) walk(v[i]); return; }
+      if (typeof v === "object") {
+        var keys = Object.keys(v);
+        for (var k = 0; k < keys.length; k++) walk(v[keys[k]]);
+      }
+    }
+
+    walk(obj);
+    return total === 0 ? 1 : nullCount / total;
+  } catch(e) {
+    return 0; // 解析失败不阻断流程
+  }
+}
+
+// ---- 记录最近一次提取的空值率，供重试按钮使用 ----
+let lastNullRate = 0;
+
+/**
+ * 手动重试：缩小选中元素范围后重新提取
+ */
+async function handleRetryNarrow() {
+  if (selectedCount <= 0) {
+    showError("没有选中元素，无法缩小范围");
+    return;
+  }
+
+  hideError();
+  DOM.btnRetryNarrow.disabled = true;
+  autoRetryCount = 0;
+
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tabs || tabs.length === 0) { showError("无法获取当前标签页"); return; }
+
+    setStatus("正在缩小选择范围...", "info");
+    const narrowResults = await chrome.scripting.executeScript({
+      target: { tabId: tabs[0].id },
+      func: narrowSelectionScope,
+    });
+    var newCount = (narrowResults && narrowResults[0] && typeof narrowResults[0].result === "number")
+      ? narrowResults[0].result : 0;
+
+    if (newCount === 0) {
+      showError("无法进一步缩小选择范围，请手动选择更精确的页面元素");
+      setStatus("缩小范围失败", "error");
+      return;
+    }
+
+    selectedCount = newCount;
+    updateSelectButton();
+    setStatus("已缩小到 " + newCount + " 个元素，正在重新提取...", "info");
+
+    // 触发提取
+    handleExtract();
+  } catch (err) {
+    showError("重试失败：" + err.message);
+    setStatus("重试失败", "error");
+  }
+}
+
+// ================================================================
 // 核心流程：提取
 // ================================================================
 
@@ -446,8 +554,10 @@ async function handleExtract() {
   if (!instruction) { DOM.txtInstruction.focus(); showError("请输入提取指令"); return; }
 
   chrome.storage.local.set({ lastInstruction: instruction }).catch(() => {});
+
   hideError(); hideResult(); hideProgress();
   DOM.btnExtract.disabled = true;
+  DOM.btnRetryNarrow.disabled = true;
   DOM.btnScrollHint.classList.remove("hidden");
 
   // 建立 keepalive 连接，防止 Service Worker 在长时间 LLM 调用期间被终止
@@ -462,53 +572,123 @@ async function handleExtract() {
     if (!config.apiKey) { showError("请先在设置页面配置 API Key"); setStatus("未配置 API Key", "error"); return; }
     if (!config.baseUrl) { showError("请先在设置页面配置 Base URL"); setStatus("未配置 Base URL", "error"); return; }
 
-    var isSelectedExtract = (selectedCount > 0);
-    setStatus(isSelectedExtract ? "正在提取 " + selectedCount + " 个选中元素的快照..." : "正在生成页面快照...", "info");
-    setProgress(10);
+    // ---- 提取循环：支持空值率过高时自动缩小范围重试 ----
+    var extractSuccess = false;
 
-    const maxContentLength = await getMaxContentLength();
-    const content = await extractPageContent(maxContentLength, isSelectedExtract);
+    while (!extractSuccess && autoRetryCount <= MAX_AUTO_RETRY) {
+      var isSelectedExtract = (selectedCount > 0);
+      if (autoRetryCount === 0) {
+        setStatus(isSelectedExtract ? "正在提取 " + selectedCount + " 个选中元素的快照..." : "正在生成页面快照...", "info");
+      } else {
+        setStatus("缩小范围后重新提取 (" + autoRetryCount + "/" + MAX_AUTO_RETRY + ")...", "info");
+      }
+      setProgress(autoRetryCount === 0 ? 10 : 5);
 
-    if (!content || content.trim().length === 0) {
-      showError("未能生成有效快照，请确认页面已加载完成");
-      setStatus("快照为空", "error");
-      return;
-    }
+      const maxContentLength = await getMaxContentLength();
+      const content = await extractPageContent(maxContentLength, isSelectedExtract);
 
-    setProgress(30);
-    setStatus("快照 " + content.length.toLocaleString() + " 字符，正在调用 LLM 分析...", "info");
+      if (!content || content.trim().length === 0) {
+        showError("未能生成有效快照，请确认页面已加载完成");
+        setStatus("快照为空", "error");
+        return;
+      }
 
-    setProgress(40);
-    const result = await callLLM(config, instruction, content);
-    setProgress(90);
+      setProgress(30);
+      setStatus("快照 " + content.length.toLocaleString() + " 字符，正在调用 LLM 分析...", "info");
 
-    const jsonText = formatJSON(result);
-    showResult(jsonText);
-    setStatus("提取完成", "success");
-    setProgress(100);
+      setProgress(40);
+      const result = await callLLM(config, instruction, content);
+      setProgress(90);
 
-    lastSavedInstruction = instruction;
-    lastSavedSystemPrompt = config.systemPrompt;
-    updateSaveRuleButton(lastSavedInstruction);
+      const jsonText = formatJSON(result);
+      showResult(jsonText);
 
-    if (isSelectedExtract) {
-      try {
-        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-        if (tabs.length > 0) chrome.tabs.sendMessage(tabs[0].id, { type: "clearSelection" });
-      } catch(e) {}
-      selectedCount = 0;
-      updateSelectButton();
+      // ---- 空值率检测 ----
+      var nullRate = calculateNullRate(jsonText);
+      var nullRatePercent = Math.round(nullRate * 100);
+      lastNullRate = nullRate;
+
+      if (nullRate > NULL_RATE_THRESHOLD && isSelectedExtract && autoRetryCount < MAX_AUTO_RETRY) {
+        // 空值率过高且有选中元素，尝试缩小范围
+        autoRetryCount++;
+        setStatus("空值率 " + nullRatePercent + "% 过高，正在缩小选择范围 (" + autoRetryCount + "/" + MAX_AUTO_RETRY + ")...", "info");
+
+        try {
+          const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tabs && tabs.length > 0) {
+            const narrowResults = await chrome.scripting.executeScript({
+              target: { tabId: tabs[0].id },
+              func: narrowSelectionScope,
+            });
+            var newCount = (narrowResults && narrowResults[0] && typeof narrowResults[0].result === "number")
+              ? narrowResults[0].result : 0;
+
+            if (newCount > 0) {
+              selectedCount = newCount;
+              updateSelectButton();
+              // 继续循环重试
+              continue;
+            }
+          }
+        } catch(retryErr) {
+          console.warn("缩小选择范围失败:", retryErr);
+        }
+        // 缩小范围失败，跳出循环
+        break;
+      }
+
+      // 空值率可接受 或 无选中元素 或 已达最大重试次数
+      if (nullRate > NULL_RATE_THRESHOLD && isSelectedExtract && autoRetryCount >= MAX_AUTO_RETRY) {
+        // 重试次数用尽，空值率仍然过高
+        setStatus("空值率 " + nullRatePercent + "% 仍过高，请手动选择更精确的页面元素", "warning");
+        setProgress(100);
+        autoRetryCount = 0;
+        lastSavedInstruction = instruction;
+        lastSavedSystemPrompt = config.systemPrompt;
+        updateSaveRuleButton(lastSavedInstruction);
+        // 自动进入选择模式，让用户手动选择
+        DOM.btnExtract.disabled = false;
+        DOM.btnScrollHint.classList.add("hidden");
+        try { keepAlivePort.disconnect(); } catch(e) {}
+        toggleSelectionMode();
+        return;
+      }
+
+      // 正常完成
+      setStatus("提取完成" + (nullRate > 0 ? "（空值率 " + nullRatePercent + "%）" : ""), "success");
+      setProgress(100);
+      autoRetryCount = 0;
+      extractSuccess = true;
+      lastSavedInstruction = instruction;
+      lastSavedSystemPrompt = config.systemPrompt;
+      updateSaveRuleButton(lastSavedInstruction);
+      cleanupAfterExtract(isSelectedExtract);
     }
   } catch (err) {
     console.error("Extraction error:", err);
     showError("提取失败：" + err.message);
     setStatus("提取失败", "error");
+    autoRetryCount = 0;
   } finally {
     // 断开 keepalive 连接
     try { keepAlivePort.disconnect(); } catch(e) {}
     DOM.btnExtract.disabled = false;
+    DOM.btnRetryNarrow.disabled = false;
     DOM.btnScrollHint.classList.add("hidden");
     setTimeout(() => { hideStatus(); hideProgress(); }, 3000);
+  }
+}
+
+/** 提取完成后的清理工作 */
+function cleanupAfterExtract(isSelectedExtract) {
+  if (isSelectedExtract) {
+    try {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        if (tabs && tabs.length > 0) chrome.tabs.sendMessage(tabs[0].id, { type: "clearSelection" });
+      });
+    } catch(e) {}
+    selectedCount = 0;
+    updateSelectButton();
   }
 }
 
@@ -544,13 +724,32 @@ async function extractPageContent(maxLength) {
 
       // shared-extractor.js 已通过 manifest content_scripts 在 document_idle 时注入，
       // window._WE 已可用，直接执行提取函数即可
+      // 但如果 content script 未注入（如扩展安装后未刷新的旧标签页），需先注入 shared-extractor.js
       chrome.scripting.executeScript({
         target: { tabId },
         func: extractContentFromDOM,
         args: [maxLength],
       }, (results) => {
         if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
-        if (!results || results.length === 0 || !results[0].result) return reject(new Error("内容提取返回为空"));
+        if (!results || results.length === 0 || !results[0].result) {
+          // 可能是 window._WE 未注入导致的失败，尝试先注入 shared-extractor.js 再重试
+          chrome.scripting.executeScript({
+            target: { tabId },
+            files: ["shared-extractor.js"],
+          }, () => {
+            if (chrome.runtime.lastError) return reject(new Error("内容提取返回为空，且注入 shared-extractor.js 失败：" + chrome.runtime.lastError.message));
+            chrome.scripting.executeScript({
+              target: { tabId },
+              func: extractContentFromDOM,
+              args: [maxLength],
+            }, (retryResults) => {
+              if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+              if (!retryResults || retryResults.length === 0 || !retryResults[0].result) return reject(new Error("内容提取返回为空"));
+              resolve(retryResults[0].result);
+            });
+          });
+          return;
+        }
         resolve(results[0].result);
       });
     });
@@ -565,6 +764,12 @@ async function extractPageContent(maxLength) {
 
 async function extractContentFromDOM(maxLength) {
   var WE = window._WE;
+
+  // 如果 shared-extractor.js 未注入（如扩展安装后未刷新的旧标签页），
+  // 返回空值让调用方触发注入重试
+  if (!WE || !WE.extractWithWait) {
+    return null;
+  }
 
   // 检测选中元素
   var selectedEls = [];
@@ -643,7 +848,8 @@ function showCopyFeedback() {
 async function handleDownload() {
   const text = DOM.jsonOutput.textContent;
   if (!text) return;
-  const format = document.getElementById("selDownloadFormat").value;
+  const activeFormat = document.querySelector("#formatSwitcher .format-option.active");
+  const format = activeFormat ? activeFormat.dataset.format : "json";
   const baseName = (document.title || "extracted-data").replace(/[\\/:*?"<>|]/g, "_").substring(0, 50);
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-").substring(0, 19);
   const namePrefix = baseName + "-" + timestamp;
@@ -961,4 +1167,89 @@ function autoSelectInSection(sectionIndex) {
   section.setAttribute("data-we-selected", "true");
   if (section.scrollIntoView) section.scrollIntoView({ behavior: "smooth", block: "center" });
   return 1;
+}
+
+// ================================================================
+// 注入函数：narrowSelectionScope — 缩小选中元素范围
+// 将当前选中的大区域拆解为其直接可见子元素，只保留文本密度最高的子集
+// ================================================================
+
+function narrowSelectionScope() {
+  var SEL_ATTR = 'data-we-selected';
+
+  // 收集当前选中的元素
+  var selected = document.querySelectorAll('[' + SEL_ATTR + '="true"]');
+  if (selected.length === 0) return 0;
+
+  // 清除旧选中样式
+  for (var ci = 0; ci < selected.length; ci++) {
+    selected[ci].removeAttribute(SEL_ATTR);
+    selected[ci].style.outline = '';
+    selected[ci].style.boxShadow = '';
+    selected[ci].style.backgroundColor = '';
+    selected[ci].style.borderRadius = '';
+  }
+
+  // 对每个选中元素，提取其直接可见子元素作为候选
+  var candidates = [];
+  for (var si = 0; si < selected.length; si++) {
+    var parent = selected[si];
+    var children = parent.children;
+    for (var chi = 0; chi < children.length; chi++) {
+      var child = children[chi];
+      var tag = child.tagName.toLowerCase();
+      // 跳过不可见和无关元素
+      if ({script:1,style:1,svg:1,noscript:1,iframe:1,canvas:1,video:1,audio:1,template:1,link:1,meta:1}[tag]) continue;
+      var cs = getComputedStyle(child);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') continue;
+      var text = (child.textContent || '').replace(/\s+/g, ' ').trim();
+      if (text.length < 10) continue;
+      var rect = child.getBoundingClientRect();
+      if (rect.width === 0 || rect.height === 0) continue;
+      candidates.push({
+        el: child,
+        textLen: text.length,
+        area: rect.width * rect.height,
+        density: text.length / Math.max(1, rect.width * rect.height)
+      });
+    }
+  }
+
+  if (candidates.length === 0) return 0;
+
+  // 按文本长度降序排列，保留文本密度最高的前 N 个
+  candidates.sort(function(a, b) { return b.textLen - a.textLen; });
+
+  // 保留文本内容最丰富的前 60%（至少保留 1 个，最多保留 15 个）
+  var keepCount = Math.max(1, Math.min(15, Math.ceil(candidates.length * 0.6)));
+
+  // 注入选中样式（如果不存在）
+  if (!document.getElementById('we-auto-select-style')) {
+    var styleEl = document.createElement('style');
+    styleEl.id = 'we-auto-select-style';
+    styleEl.textContent =
+      "[data-we-selected='true'] {" +
+      "  outline: 3px solid #16a34a !important; outline-offset: 3px !important;" +
+      "  box-shadow: 0 0 0 6px rgba(22,163,74,0.15), 0 0 20px rgba(22,163,74,0.3) !important;" +
+      "  background-color: rgba(22,163,74,0.04) !important; border-radius: 4px !important;" +
+      "}" +
+      "[data-we-selected='true']::before {" +
+      "  content: 'AI \\7F29 \\5C0F \\8303 \\56F4'; position: absolute; top: -32px; left: 4px;" +
+      "  background: #16a34a; color: #fff; font-size: 12px; font-weight: 600;" +
+      "  padding: 2px 10px; border-radius: 4px; z-index: 2147483647;" +
+      "  pointer-events: none; white-space: nowrap;" +
+      "}";
+    document.head.appendChild(styleEl);
+  }
+
+  var newCount = 0;
+  for (var ni = 0; ni < keepCount; ni++) {
+    var c = candidates[ni].el;
+    var pos = getComputedStyle(c).position;
+    if (pos === 'static') c.style.position = 'relative';
+    c.setAttribute(SEL_ATTR, 'true');
+    newCount++;
+  }
+
+  return newCount;
 }

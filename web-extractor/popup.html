@@ -114,6 +114,13 @@
             </svg>
             保存规则
           </button>
+          <button id="btnRetryNarrow" class="btn-secondary btn-sm btn-retry-narrow" title="缩小选择范围并重新提取">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"></path>
+            </svg>
+            缩小重试
+          </button>
           <button id="btnCopy" class="btn-secondary btn-sm" title="复制到剪贴板">
             <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
@@ -121,19 +128,21 @@
             </svg>
             复制
           </button>
-          <button id="btnDownload" class="btn-secondary btn-sm" title="下载文件">
-            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"></path>
-              <polyline points="7 10 12 15 17 10"></polyline>
-              <line x1="12" y1="15" x2="12" y2="3"></line>
-            </svg>
-            下载
-            <select id="selDownloadFormat" class="download-format-select" title="选择下载格式">
-              <option value="json">JSON</option>
-              <option value="csv">CSV</option>
-              <option value="xlsx">XLSX</option>
-            </select>
-          </button>
+          <div class="download-group">
+            <div id="formatSwitcher" class="format-switcher" title="选择下载格式">
+              <button class="format-option active" data-format="json">JSON</button>
+              <button class="format-option" data-format="csv">CSV</button>
+              <button class="format-option" data-format="xlsx">XLSX</button>
+            </div>
+            <button id="btnDownload" class="btn-secondary btn-sm" title="下载文件">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"></path>
+                <polyline points="7 10 12 15 17 10"></polyline>
+                <line x1="12" y1="15" x2="12" y2="3"></line>
+              </svg>
+              下载
+            </button>
+          </div>
         </div>
       </div>
       <pre id="jsonOutput" class="json-output"></pre>

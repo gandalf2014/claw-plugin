@@ -90,6 +90,12 @@ body {
   color: #991b1b;
 }
 
+.status-bar.warning {
+  background: #fffbeb;
+  border-color: #fde68a;
+  color: #92400e;
+}
+
 .status-icon {
   width: 16px;
   height: 16px;
@@ -111,6 +117,16 @@ body {
 .status-bar.error .status-icon::after {
   content: "✕";
   font-weight: 700;
+}
+
+.status-bar.warning .status-icon {
+  background: #f59e0b;
+}
+
+.status-bar.warning .status-icon::after {
+  content: "!";
+  font-weight: 700;
+  color: #fff;
 }
 
 @keyframes spin {
@@ -546,7 +562,10 @@ body {
 
 .result-actions {
   display: flex;
-  gap: 4px;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  max-width: 70%;
 }
 
 .btn-secondary {
@@ -569,34 +588,62 @@ body {
   background: #eef2ff;
 }
 
-.download-format-select {
-  appearance: none;
-  -webkit-appearance: none;
+.download-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.format-switcher {
+  display: inline-flex;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #ffffff;
+}
+
+.format-option {
   border: none;
-  background: #f1f5f9;
-  color: #475569;
+  background: transparent;
+  color: #94a3b8;
   font-size: 11px;
   font-weight: 600;
-  padding: 2px 18px 2px 6px;
-  border-radius: 4px;
+  padding: 4px 8px;
   cursor: pointer;
-  margin-left: 4px;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='8' viewBox='0 0 24 24' fill='none' stroke='%2364748b' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E");
-  background-repeat: no-repeat;
-  background-position: right 4px center;
-  outline: none;
+  transition: all 0.15s;
+  border-right: 1px solid #e2e8f0;
+  line-height: 1;
 }
 
-.download-format-select:hover {
-  background-color: #e2e8f0;
+.format-option:last-child {
+  border-right: none;
 }
 
-.download-format-select:focus {
-  background-color: #dbeafe;
+.format-option:hover {
+  color: #667eea;
+  background: #eef2ff;
+}
+
+.format-option.active {
+  color: #ffffff;
+  background: #667eea;
 }
 
 .btn-sm {
-  padding: 4px 10px;
+  padding: 3px 8px;
+  font-size: 11px;
+}
+
+.btn-retry-narrow {
+  color: #d97706;
+  border-color: #fbbf24;
+  background: #fffbeb;
+}
+
+.btn-retry-narrow:hover {
+  color: #b45309;
+  border-color: #d97706;
+  background: #fef3c7;
 }
 
 .json-output {
