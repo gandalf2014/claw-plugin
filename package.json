@@ -1,5 +1,15 @@
 {
-  "dependencies": {
+  "name": "web-data-extractor",
+  "version": "1.0.0",
+  "description": "Chrome/Edge browser extension for LLM-powered structured data extraction from web pages, supporting JSON/CSV/XLSX output",
+  "author": "Web Data Extractor contributors",
+  "license": "MIT",
+  "scripts": {
+    "test": "npx playwright test",
+    "test:ui": "npx playwright test --ui",
+    "lint": "npx eslint web-extractor/*.js"
+  },
+  "devDependencies": {
     "@playwright/test": "^1.60.0"
   }
 }

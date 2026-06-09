@@ -3,6 +3,14 @@
 // 负责 LLM API 调用（非跨域限制，Service Worker 无 CORS 限制）
 // ============================================================
 
+// 调试开关：设为 true 可启用 Service Worker 日志输出
+var BG_DEBUG = false;
+
+function _bgLog(/* ... */) {
+  if (!BG_DEBUG) return;
+  console.log.apply(console, arguments);
+}
+
 // 监听来自 popup 的消息
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.type === "callLLM") {
@@ -106,7 +114,7 @@ async function handleLLMCall(request, sender) {
     });
   }
 
-  console.log("[Background] Calling LLM API:", apiUrl);
+  _bgLog("[Background] Calling LLM API:", apiUrl);
 
   // 发送请求
   let response;
@@ -183,7 +191,7 @@ async function handleLLMCall(request, sender) {
     try {
       JSON.parse(resultText);
     } catch (e2) {
-      console.warn("[Background] LLM 返回的不是有效 JSON，将返回原始文本");
+      _bgLog("[Background] LLM 返回的不是有效 JSON，将返回原始文本");
     }
   }
 
