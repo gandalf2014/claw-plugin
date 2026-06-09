@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Web Data Extractor</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="header">
+      <h1 class="title">Web Data Extractor</h1>
+      <span class="subtitle">LLM 智能提取</span>
+      <button id="btnSettings" class="btn-icon" title="设置">
+        <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"></path>
+        </svg>
+      </button>
+    </header>
+
+    <!-- Status Bar -->
+    <div id="statusBar" class="status-bar hidden">
+      <span id="statusIcon" class="status-icon"></span>
+      <span id="statusText" class="status-text"></span>
+    </div>
+
+    <!-- Input Area -->
+    <section class="input-section">
+      <label for="txtInstruction" class="label">提取指令</label>
+      <textarea
+        id="txtInstruction"
+        class="input-textarea"
+        placeholder="描述你需要提取的数据，例如：&#10;提取页面上所有酒店的名称、价格、评分、评价数量和是否包含早餐"
+        rows="4"
+      ></textarea>
+      <div class="quick-prompts">
+        <span class="quick-label">快捷指令：</span>
+        <button class="btn-quick" data-prompt="提取页面上所有酒店的名称、价格、评分、评价数量和是否包含早餐">酒店信息</button>
+        <button class="btn-quick" data-prompt="提取页面中所有产品的名称、价格、销量和评分">商品列表</button>
+        <button class="btn-quick" data-prompt="提取当前文章的标题、作者、发布日期和正文摘要">文章内容</button>
+      </div>
+    </section>
+
+    <!-- Action Buttons -->
+    <div class="actions">
+      <button id="btnSelect" class="btn-secondary">
+        <svg class="btn-icon-svg" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="2" width="20" height="20" rx="2"></rect>
+          <circle cx="10" cy="8" r="1"></circle>
+          <circle cx="18" cy="18" r="1"></circle>
+          <line x1="10" y1="8" x2="18" y2="18"></line>
+        </svg>
+        选择元素
+      </button>
+      <button id="btnExtract" class="btn-primary">
+        <svg class="btn-icon-svg" xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="23 6 13.5 15.5 8.5 10.5 1 18"></polyline>
+          <polyline points="17 6 23 6 23 12"></polyline>
+        </svg>
+        开始提取
+      </button>
+      <span id="btnScrollHint" class="scroll-hint hidden">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"></circle>
+          <line x1="12" y1="8" x2="12" y2="12"></line>
+          <line x1="12" y1="16" x2="12.01" y2="16"></line>
+        </svg>
+        请先向下滚动页面确保数据加载完整
+      </span>
+    </div>
+
+    <!-- Auto-Detected Area Picker -->
+    <section id="areaPicker" class="area-picker hidden">
+      <div class="area-picker-header">
+        <span class="area-picker-title">检测到页面内容区域（按显示面积排序）</span>
+        <span id="areaCount" class="area-count"></span>
+      </div>
+      <div id="areaPickerList" class="area-picker-list"></div>
+    </section>
+
+    <!-- Extraction History -->
+    <section id="historySection" class="history-section">
+      <div class="history-toggle" id="historyToggle">
+        <svg class="history-chevron" xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="9 18 15 12 9 6"></polyline>
+        </svg>
+        <span>提取历史</span>
+        <span id="historyCount" class="history-count"></span>
+      </div>
+      <div id="historyList" class="history-list hidden">
+        <div id="historyItems" class="history-items"></div>
+        <div id="historyEmpty" class="history-empty hidden">
+          暂无保存的提取规则，提取成功后点击「保存规则」即可加入历史
+        </div>
+        <button id="btnClearHistory" class="btn-link hidden">清除全部历史</button>
+      </div>
+    </section>
+
+    <!-- Progress -->
+    <div id="progressBar" class="progress-bar hidden">
+      <div id="progressFill" class="progress-fill"></div>
+    </div>
+
+    <!-- Result Area -->
+    <section id="resultSection" class="result-section hidden">
+      <div class="result-header">
+        <h2 class="result-title">提取结果</h2>
+        <div class="result-actions">
+          <button id="btnSaveRule" class="btn-secondary btn-sm" title="保存当前提取规则到历史">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"></path>
+            </svg>
+            保存规则
+          </button>
+          <button id="btnCopy" class="btn-secondary btn-sm" title="复制到剪贴板">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+              <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"></path>
+            </svg>
+            复制
+          </button>
+          <button id="btnDownload" class="btn-secondary btn-sm" title="下载文件">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            下载
+            <select id="selDownloadFormat" class="download-format-select" title="选择下载格式">
+              <option value="json">JSON</option>
+              <option value="csv">CSV</option>
+              <option value="xlsx">XLSX</option>
+            </select>
+          </button>
+        </div>
+      </div>
+      <pre id="jsonOutput" class="json-output"></pre>
+    </section>
+
+    <!-- Empty State -->
+    <section id="emptyState" class="empty-state">
+      <svg class="empty-icon" xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+      </svg>
+      <p class="empty-text">输入提取指令后点击「开始提取」<br>即可从当前页面获取结构化数据</p>
+    </section>
+
+    <!-- Error State -->
+    <div id="errorBanner" class="error-banner hidden">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="10"></circle>
+        <line x1="15" y1="9" x2="9" y2="15"></line>
+        <line x1="9" y1="9" x2="15" y2="15"></line>
+      </svg>
+      <span id="errorText"></span>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+      <span>快照上限: <strong id="contentLimit">20,000</strong> 字符</span>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

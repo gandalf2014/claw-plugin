@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>设置 - Web Data Extractor</title>
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header class="page-header">
+      <h1>Web Data Extractor</h1>
+      <p class="subtitle">配置 LLM API 连接参数</p>
+    </header>
+
+    <!-- Main Form -->
+    <main class="form-container">
+      <!-- 成功提示 -->
+      <div id="saveBanner" class="save-banner hidden">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M22 11.08V12a10 10 0 11-5.93-9.14"></path>
+          <polyline points="22 4 12 14.01 9 11.01"></polyline>
+        </svg>
+        设置已保存
+      </div>
+
+      <!-- API 配置 -->
+      <section class="form-section">
+        <h2 class="section-title">LLM API 配置</h2>
+
+        <div class="form-group">
+          <label for="apiKey" class="form-label">
+            API Key
+            <span class="required">*</span>
+          </label>
+          <div class="input-wrapper">
+            <input
+              type="password"
+              id="apiKey"
+              class="form-input"
+              placeholder="sk-..."
+              autocomplete="off"
+            />
+            <button id="btnToggleKey" class="btn-toggle" title="显示/隐藏">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+            </button>
+          </div>
+          <p class="form-hint">你的 OpenAI / Anthropic / 其他兼容 API 的密钥</p>
+        </div>
+
+        <div class="form-group">
+          <label for="baseUrl" class="form-label">
+            Base URL
+            <span class="required">*</span>
+          </label>
+          <input
+            type="url"
+            id="baseUrl"
+            class="form-input"
+            placeholder="https://api.openai.com/v1"
+          />
+          <p class="form-hint">
+            常用地址：OpenAI: https://api.openai.com/v1 |
+            Anthropic: https://api.anthropic.com |
+            也支持 Azure / Ollama / vLLM 等兼容接口
+          </p>
+        </div>
+
+        <div class="form-group">
+          <label for="modelName" class="form-label">模型名称</label>
+          <input
+            type="text"
+            id="modelName"
+            class="form-input"
+            placeholder="gpt-4o"
+          />
+          <p class="form-hint">
+            推荐：gpt-4o / gpt-4o-mini / claude-3-5-sonnet-20241022 /
+            deepseek-chat / qwen-plus（任何兼容 OpenAI 格式的模型均可）
+          </p>
+        </div>
+      </section>
+
+      <!-- 提取设置 -->
+      <section class="form-section">
+        <h2 class="section-title">提取设置</h2>
+
+        <div class="form-group">
+          <label for="maxContentLength" class="form-label">
+            最大页面内容长度（字符数）
+          </label>
+          <input
+            type="number"
+            id="maxContentLength"
+            class="form-input"
+            min="1000"
+            max="100000"
+            step="1000"
+            value="50000"
+          />
+          <p class="form-hint">
+            超出此长度的页面内容将被截断。建议 15,000-30,000 字符。
+            过大会导致 Token 消耗过高，过小可能丢失关键数据。
+          </p>
+        </div>
+
+        <div class="form-group">
+          <label for="systemPrompt" class="form-label">自定义 System Prompt</label>
+          <textarea
+            id="systemPrompt"
+            class="form-textarea"
+            rows="14"
+            placeholder="自定义 System Prompt（留空则使用默认）"
+          ></textarea>
+          <div class="prompt-actions">
+            <button id="btnResetPrompt" class="btn-link">恢复默认 Prompt</button>
+            <span id="promptCharCount" class="char-count">0 字符</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- 按钮 -->
+      <div class="form-actions">
+        <button id="btnSave" class="btn-primary">保存设置</button>
+        <button id="btnTest" class="btn-secondary">测试连接</button>
+      </div>
+
+      <!-- 测试结果 -->
+      <div id="testResult" class="test-result hidden"></div>
+    </main>
+
+    <!-- Footer -->
+    <footer class="page-footer">
+      <p>API Key 存储在浏览器本地存储 (chrome.storage.sync) 中，不会上传到任何第三方服务器。</p>
+    </footer>
+  </div>
+
+  <script src="options.js"></script>
+</body>
+</html>

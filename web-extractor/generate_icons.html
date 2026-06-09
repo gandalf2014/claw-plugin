@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>生成扩展图标</title>
+  <style>
+    body {
+      font-family: -apple-system, sans-serif;
+      display: flex; flex-direction: column;
+      align-items: center; padding: 40px;
+      background: #f1f5f9; color: #1e293b;
+    }
+    h1 { font-size: 20px; margin-bottom: 8px; }
+    p { color: #64748b; margin-bottom: 24px; }
+    canvas { display: none; }
+    .previews { display: flex; gap: 24px; margin-bottom: 24px; align-items: flex-end; }
+    .preview-item { text-align: center; }
+    .preview-item img { border: 1px solid #e2e8f0; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+    .preview-item span { display: block; margin-top: 6px; font-size: 12px; color: #94a3b8; }
+    button {
+      padding: 12px 28px; font-size: 15px; font-weight: 600; border: none; border-radius: 8px;
+      background: linear-gradient(135deg, #667eea, #764ba2); color: #fff; cursor: pointer;
+    }
+    button:hover { opacity: .9; }
+    .status { margin-top: 16px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Web Data Extractor - 图标生成器</h1>
+  <p>点击按钮生成并下载 16x16 / 48x48 / 128x128 的扩展图标</p>
+
+  <div class="previews" id="previews"></div>
+
+  <button onclick="generateAll()">生成并下载图标</button>
+  <div class="status" id="status"></div>
+
+  <canvas id="c16" width="16" height="16"></canvas>
+  <canvas id="c48" width="48" height="48"></canvas>
+  <canvas id="c128" width="128" height="128"></canvas>
+
+  <script>
+    function drawIcon(canvas) {
+      const ctx = canvas.getContext("2d");
+      const w = canvas.width, h = canvas.height;
+
+      // 渐变背景
+      const grad = ctx.createLinearGradient(0, 0, w, h);
+      grad.addColorStop(0, "#667eea");
+      grad.addColorStop(1, "#764ba2");
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.roundRect(0, 0, w, h, w * 0.2);
+      ctx.fill();
+
+      // 提取数据图标：小括号 + 箭头
+      ctx.strokeStyle = "#ffffff";
+      ctx.fillStyle = "#ffffff";
+      ctx.lineWidth = w * 0.08;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+
+      const cx = w * 0.5, cy = h * 0.5;
+      const r = w * 0.30;
+
+      // 绘制一个简化的大括号/提取图标
+      // 左括号
+      const left = cx - r * 0.5;
+      ctx.beginPath();
+      ctx.moveTo(left, cy - r * 0.5);
+      ctx.quadraticCurveTo(left + r * 0.3, cy - r * 0.5, left + r * 0.3, cy);
+      ctx.quadraticCurveTo(left + r * 0.3, cy + r * 0.5, left, cy + r * 0.5);
+      ctx.stroke();
+
+      // 右括号
+      const right = cx + r * 0.5;
+      ctx.beginPath();
+      ctx.moveTo(right, cy - r * 0.5);
+      ctx.quadraticCurveTo(right - r * 0.3, cy - r * 0.5, right - r * 0.3, cy);
+      ctx.quadraticCurveTo(right - r * 0.3, cy + r * 0.5, right, cy + r * 0.5);
+      ctx.stroke();
+
+      // 中间的小方块（代表数据）
+      ctx.lineWidth = w * 0.06;
+      const dotSize = w * 0.06;
+      ctx.fillRect(cx - dotSize, cy - dotSize, dotSize * 2, dotSize * 2);
+    }
+
+    function downloadBlob(blob, filename) {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function generateAll() {
+      const sizes = [16, 48, 128];
+      const previews = document.getElementById("previews");
+      previews.innerHTML = "";
+      let done = 0;
+
+      sizes.forEach((size) => {
+        const canvas = document.getElementById("c" + size);
+        drawIcon(canvas);
+
+        canvas.toBlob((blob) => {
+          downloadBlob(blob, `icon${size}.png`);
+          done++;
+
+          // 预览
+          const img = document.createElement("img");
+          img.src = canvas.toDataURL();
+          img.width = size;
+          img.height = size;
+          const div = document.createElement("div");
+          div.className = "preview-item";
+          div.appendChild(img);
+          const label = document.createElement("span");
+          label.textContent = `${size}x${size}`;
+          div.appendChild(label);
+          previews.appendChild(div);
+
+          if (done === sizes.length) {
+            document.getElementById("status").textContent =
+              "图标已下载！请将 icon16.png / icon48.png / icon128.png 放入 icons/ 目录";
+          }
+        }, "image/png");
+      });
+    }
+
+    // 自动生成
+    window.onload = () => generateAll();
+  </script>
+</body>
+</html>
