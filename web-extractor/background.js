@@ -53,6 +53,14 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
       chrome.action.openPopup();
     } catch (_) { /* 某些浏览器/环境不支持，用户可手动点击图标 */ }
   }
+
+  // 翻页按钮指定完成 → 存储 XPath 并打开 popup
+  if (request.type === "nextPageSelected") {
+    chrome.storage.local.set({ pendingNextPageXPath: request.xpath || "" }).catch(() => {});
+    try {
+      chrome.action.openPopup();
+    } catch (_) {}
+  }
 });
 
 /**

@@ -104,6 +104,16 @@ async function applyHistoryItem(id) {
   DOM.txtInstruction.value = item.instruction;
   DOM.txtInstruction.focus();
 
+  // 还原自定义翻页按钮 XPath
+  if (item.extractionContext && item.extractionContext.customNextPageXPath) {
+    customNextPageXPath = item.extractionContext.customNextPageXPath;
+    try {
+      await chrome.storage.local.set({ customNextPageXPath: customNextPageXPath });
+    } catch(e) {}
+  } else {
+    customNextPageXPath = null;
+  }
+
   item.useCount = (item.useCount || 0) + 1;
   item.lastUsed = new Date().toISOString();
   await saveHistory();
@@ -256,7 +266,8 @@ async function handleSaveRule(lastSavedInstruction, lastSavedSystemPrompt) {
       mode: selectedCount > 0 ? "selected" : "fullpage",
       elementCount: selectedCount,
       wasAutoDetected: autoDetectionDone && selectedCount > 0,
-      selectedXPaths: selectedXPaths
+      selectedXPaths: selectedXPaths,
+      customNextPageXPath: (typeof customNextPageXPath !== 'undefined') ? customNextPageXPath : null
     };
     await saveHistory();
     renderHistory();
@@ -280,7 +291,8 @@ async function handleSaveRule(lastSavedInstruction, lastSavedSystemPrompt) {
       mode: selectedCount > 0 ? "selected" : "fullpage",
       elementCount: selectedCount,
       wasAutoDetected: autoDetectionDone && selectedCount > 0,
-      selectedXPaths: selectedXPaths
+      selectedXPaths: selectedXPaths,
+      customNextPageXPath: (typeof customNextPageXPath !== 'undefined') ? customNextPageXPath : null
     }
   });
 

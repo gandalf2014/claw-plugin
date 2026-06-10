@@ -25,6 +25,7 @@ const DOM = {
   btnSaveRule:    document.getElementById("btnSaveRule"),
   btnRetryNarrow: document.getElementById("btnRetryNarrow"),
   btnMultiExtract:document.getElementById("btnMultiExtract"),
+  btnPickNextPage:document.getElementById("btnPickNextPage"),
   pageCount:      document.getElementById("pageCount"),
   paginationStatus: document.getElementById("paginationStatus"),
   statusBar:      document.getElementById("statusBar"),
@@ -62,6 +63,7 @@ let currentAreaIndex = 0;
 let paginationDetected = false;
 let paginationInfo = null;
 let multiPageExtracting = false;
+let customNextPageXPath = null;   // 用户手动指定的翻页按钮 XPath
 
 // ---- 工具函数 ----
 function _sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
@@ -71,6 +73,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   await loadSavedInstruction();
   await loadMaxContentLength();
   await loadHistory();
+  await loadCustomNextPageXPath();
   bindEvents();
   listenForSelectionComplete();
   await checkSelectedElements();
@@ -116,6 +119,7 @@ function bindEvents() {
   });
 
   DOM.btnMultiExtract.addEventListener("click", handleMultiPageExtract);
+  DOM.btnPickNextPage.addEventListener("click", handlePickNextPage);
   DOM.pageCount.addEventListener("change", () => {
     var v = parseInt(DOM.pageCount.value, 10);
     if (isNaN(v) || v < 1) DOM.pageCount.value = 1;
@@ -150,6 +154,15 @@ async function loadMaxContentLength() {
     const limit = data.maxContentLength || EXTRACTOR_CONSTANTS.DEFAULT_MAX_CONTENT_LENGTH;
     DOM.contentLimit.textContent = limit.toLocaleString();
   } catch (_) { /* ignore */ }
+}
+
+async function loadCustomNextPageXPath() {
+  try {
+    var data = await chrome.storage.local.get("customNextPageXPath");
+    if (data.customNextPageXPath) {
+      customNextPageXPath = data.customNextPageXPath;
+    }
+  } catch(_) {}
 }
 
 // ---- 状态管理 ----
@@ -288,14 +301,22 @@ function updateMultiExtractButton() {
   DOM.btnMultiExtract.disabled = !(hasInstruction && hasContent && !multiPageExtracting);
   
   // 更新分页状态提示
-  if (paginationDetected && paginationInfo) {
+  if (customNextPageXPath) {
+    DOM.paginationStatus.textContent = '已指定翻页按钮';
+    DOM.paginationStatus.style.color = '#16a34a';
+    if (DOM.btnPickNextPage) DOM.btnPickNextPage.classList.add('picked');
+    DOM.btnMultiExtract.disabled = !(hasInstruction && hasContent && !multiPageExtracting);
+  } else if (paginationDetected && paginationInfo) {
     DOM.paginationStatus.textContent = paginationInfo.text ? '检测到翻页: ' + paginationInfo.text : '检测到翻页';
     DOM.paginationStatus.style.color = '#16a34a';
+    if (DOM.btnPickNextPage) DOM.btnPickNextPage.classList.remove('picked');
   } else if (hasContent) {
     DOM.paginationStatus.textContent = '未检测到翻页';
     DOM.paginationStatus.style.color = '#94a3b8';
+    if (DOM.btnPickNextPage) DOM.btnPickNextPage.classList.remove('picked');
   } else {
     DOM.paginationStatus.textContent = '';
+    if (DOM.btnPickNextPage) DOM.btnPickNextPage.classList.remove('picked');
   }
 }
 
@@ -315,6 +336,25 @@ async function checkPagination(tabId) {
     paginationInfo = null;
   }
   updateMultiExtractButton();
+}
+
+// ---- 手动指定翻页按钮 ----
+async function handlePickNextPage() {
+  try {
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tabs || tabs.length === 0) { showError("无法获取当前标签页"); return; }
+    var tabId = tabs[0].id;
+
+    // 注入翻页按钮拾取器
+    await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: startNextPagePicker,
+    });
+    // 关闭 popup，让用户在页面上操作
+    window.close();
+  } catch(e) {
+    showError("启动翻页按钮选择失败: " + e.message);
+  }
 }
 
 // ---- 选择模式切换 ----
@@ -1348,6 +1388,128 @@ function getSelectedElementTexts() {
 }
 
 // ================================================================
+// 注入函数：startNextPagePicker — 让用户手动点击翻页按钮并记录 XPath
+// ================================================================
+
+function startNextPagePicker() {
+  var PICKER_ID = 'we-next-page-picker-style';
+
+  // 清理旧实例
+  var oldStyle = document.getElementById(PICKER_ID);
+  if (oldStyle) oldStyle.remove();
+  var oldToast = document.getElementById('we-picker-toast');
+  if (oldToast) oldToast.remove();
+
+  // 注入样式
+  var style = document.createElement('style');
+  style.id = PICKER_ID;
+  style.textContent = [
+    'body.we-picking-next, body.we-picking-next * { cursor: crosshair !important; }',
+    '.we-picker-hover { outline: 2px dashed #3b82f6 !important; outline-offset: 2px !important; background-color: rgba(59,130,246,0.08) !important; }',
+    '#we-picker-toast { position: fixed !important; bottom: 24px !important; left: 50% !important; transform: translateX(-50%) !important; z-index: 2147483647 !important; background: #1e40af !important; color: #fff !important; padding: 10px 20px !important; border-radius: 10px !important; font-size: 14px !important; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; box-shadow: 0 4px 20px rgba(0,0,0,0.3) !important; pointer-events: none !important; }',
+  ].join('\n');
+  document.head.appendChild(style);
+
+  // 提示 toast
+  var toast = document.createElement('div');
+  toast.id = 'we-picker-toast';
+  toast.textContent = '请点击页面上的「下一页」按钮';
+  document.body.appendChild(toast);
+
+  var hoverEl = null;
+
+  function _isSelectable(el) {
+    if (!el || el.nodeType !== 1) return false;
+    var tag = el.tagName.toLowerCase();
+    if (tag === 'html' || tag === 'body') return false;
+    if (tag === 'script' || tag === 'style' || tag === 'svg' || tag === 'path') return false;
+    if (el.id === PICKER_ID || el.id === 'we-picker-toast') return false;
+    return true;
+  }
+
+  function _computeXPath(el) {
+    if (el.id) return '//*[@id="' + el.id.replace(/"/g, '\\"') + '"]';
+    var parts = [];
+    var current = el;
+    while (current && current.nodeType === 1) {
+      var tag = current.nodeName.toLowerCase();
+      var parent = current.parentNode;
+      if (!parent || parent.nodeType !== 1) { parts.unshift(tag); break; }
+      var siblings = [];
+      var childNodes = parent.childNodes;
+      for (var i = 0; i < childNodes.length; i++) {
+        if (childNodes[i].nodeType === 1 && childNodes[i].nodeName === current.nodeName) {
+          siblings.push(childNodes[i]);
+        }
+      }
+      if (siblings.length > 1) {
+        var idx = 1;
+        for (var j = 0; j < siblings.length; j++) {
+          if (siblings[j] === current) { idx = j + 1; break; }
+        }
+        parts.unshift(tag + '[' + idx + ']');
+      } else {
+        parts.unshift(tag);
+      }
+      current = parent;
+    }
+    return '/' + parts.join('/');
+  }
+
+  function cleanup() {
+    document.removeEventListener('mousemove', onMouseMove, true);
+    document.removeEventListener('click', onClick, true);
+    document.removeEventListener('keydown', onKeyDown, true);
+    if (hoverEl) { try { hoverEl.classList.remove('we-picker-hover'); } catch(e) {} hoverEl = null; }
+    var hs = document.querySelectorAll('.we-picker-hover');
+    for (var i = 0; i < hs.length; i++) hs[i].classList.remove('we-picker-hover');
+    document.body.classList.remove('we-picking-next');
+    var st = document.getElementById(PICKER_ID);
+    if (st) st.remove();
+    var tb = document.getElementById('we-picker-toast');
+    if (tb) tb.remove();
+  }
+
+  function onMouseMove(e) {
+    var target = e.target;
+    if (!_isSelectable(target)) return;
+    if (hoverEl !== target) {
+      if (hoverEl) { try { hoverEl.classList.remove('we-picker-hover'); } catch(e) {} }
+      hoverEl = target;
+      try { target.classList.add('we-picker-hover'); } catch(e) {}
+    }
+  }
+
+  function onClick(e) {
+    var target = e.target;
+    if (!_isSelectable(target)) return;
+    e.preventDefault(); e.stopPropagation();
+    var xpath = _computeXPath(target);
+    cleanup();
+    // 存储 XPath 并通知 background 打开 popup
+    chrome.storage.local.set({ customNextPageXPath: xpath, pendingNextPageXPath: xpath }, function() {
+      chrome.runtime.sendMessage({ type: 'nextPageSelected', xpath: xpath });
+    });
+  }
+
+  function onKeyDown(e) {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      cleanup();
+      // 取消时不传 xpath
+      chrome.storage.local.set({ pendingNextPageXPath: '' }, function() {
+        chrome.runtime.sendMessage({ type: 'nextPageSelected', xpath: '' });
+      });
+    }
+  }
+
+  document.body.classList.add('we-picking-next');
+  document.addEventListener('mousemove', onMouseMove, true);
+  document.addEventListener('click', onClick, true);
+  document.addEventListener('keydown', onKeyDown, true);
+}
+
+// ================================================================
 // 注入函数：detectPaginationOnPage — 检测页面翻页组件
 // ================================================================
 
@@ -1405,14 +1567,57 @@ function detectPaginationOnPage() {
     }
   }
 
+  // ---- 回退：检测仅有页码数字（无“下一页”按钮）的分页 ----
+  var pageItemSelectors = [
+    '.ant-pagination-item',
+    '.el-pager li.number',
+    '.el-pager li:not(.active)',
+    'li.page-item:not(.active)',
+    'li[class*="page-item"]',
+    '[class*="pagination"] li:not([class*="next"]):not([class*="prev"]):not([class*="disabled"])',
+    'nav[aria-label*="pagination" i] a[href]',
+    'nav[aria-label*="分页" i] a[href]',
+    '[class*="pager"] li',
+  ];
+
+  for (var si = 0; si < pageItemSelectors.length; si++) {
+    try {
+      var pageItems = document.querySelectorAll(pageItemSelectors[si]);
+      for (var pj = 0; pj < pageItems.length; pj++) {
+        var pi = pageItems[pj];
+        if (!pi.offsetParent) continue;
+        var pit = (pi.textContent || '').trim();
+        if (/^\d+$/.test(pit)) {
+          return { found: true, selector: 'page-number', tag: pi.tagName.toLowerCase(), text: '页码 ' + pit };
+        }
+      }
+    } catch(e) {}
+  }
+
   return { found: false };
 }
 
 // ================================================================
 // 注入函数：clickNextPageOnPage — 点击翻页按钮
+// 策略：优先点「下一页」按钮，不存在则点具体页码
+// 参数 targetPage: 目标页码（当无下一页按钮时使用）
 // ================================================================
 
-function clickNextPageOnPage() {
+function clickNextPageOnPage(targetPage, customXPath) {
+  // ---- 第零优先：用户指定的自定义 XPath ----
+  if (customXPath && customXPath.length > 0) {
+    try {
+      var result = document.evaluate(customXPath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+      var customEl = result.singleNodeValue;
+      if (customEl && customEl.nodeType === 1 && customEl.offsetParent) {
+        customEl.scrollIntoView({ behavior: 'instant', block: 'center' });
+        customEl.click();
+        return { clicked: true, method: 'custom-xpath', xpath: customXPath, text: (customEl.textContent || '').trim().substring(0, 40) };
+      }
+    } catch(e) {}
+  }
+
+  // ---- 第一优先：点击「下一页」按钮 ----
   var NEXT_SELECTORS = [
     'a[rel="next"]',
     '[class*="pagination"] [class*="next"]:not(.disabled)',
@@ -1420,8 +1625,15 @@ function clickNextPageOnPage() {
     '.ant-pagination-next:not(.ant-pagination-disabled)',
     '.el-pagination button.btn-next:not([disabled])',
     '.el-pagination .btn-next:not([disabled])',
+    '.t-pagination__btn-next:not(.t-is-disabled)',
+    '.arco-pagination-item-next:not(.arco-pagination-item-disabled)',
     '[aria-label*="next" i]:not([aria-label*="previous" i])',
     '[aria-label*="下一页"]',
+    '[aria-label*="下一頁"]',
+    'nav[aria-label*="pagination" i] a[href]:last-of-type',
+    'nav[aria-label*="分页" i] a[href]:last-of-type',
+    '[data-testid*="next-page"]',
+    'ul.pagination li.next a:not(.disabled)',
   ];
 
   for (var i = 0; i < NEXT_SELECTORS.length; i++) {
@@ -1434,7 +1646,7 @@ function clickNextPageOnPage() {
         if (el.getAttribute('aria-disabled') === 'true') continue;
         el.scrollIntoView({ behavior: 'instant', block: 'center' });
         el.click();
-        return { clicked: true, selector: NEXT_SELECTORS[i], text: (el.textContent || '').trim().substring(0, 40) };
+        return { clicked: true, method: 'next-button', selector: NEXT_SELECTORS[i], text: (el.textContent || '').trim().substring(0, 40) };
       }
     } catch(e) {}
   }
@@ -1450,7 +1662,64 @@ function clickNextPageOnPage() {
     for (var ti = 0; ti < NEXT_TEXTS.length; ti++) {
       if (ct === NEXT_TEXTS[ti]) {
         c.click();
-        return { clicked: true, selector: 'text-match', text: c.textContent.trim().substring(0, 40) };
+        return { clicked: true, method: 'next-text', text: c.textContent.trim().substring(0, 40) };
+      }
+    }
+  }
+
+  // ---- 第二优先：点击具体页码 ----
+  if (targetPage !== undefined && targetPage !== null) {
+    var pageNum = String(targetPage);
+    var pageSelectors = [
+      // 主流 UI 框架
+      '.ant-pagination-item-' + pageNum + ' a',
+      '.ant-pagination-item[title="' + pageNum + '"] a',
+      // Element UI: el-pager 下的第 N 个 li
+      // 通用分页结构
+      'li[class*="page"]:not([class*="next"]):not([class*="prev"]) a',
+      'li[class*="number"] a',
+      '.pagination li a',
+      '.pagination a[href]',
+      '[class*="pagination"] a:not([class*="next"]):not([class*="prev"]):not([class*="disabled"])',
+      'nav[aria-label*="pagination" i] a',
+      'nav[aria-label*="分页" i] a',
+      '[class*="pager"] li:not([class*="next"]):not([class*="prev"]) a',
+      '[class*="pager"] a:not([class*="next"]):not([class*="prev"])',
+    ];
+
+    for (var si = 0; si < pageSelectors.length; si++) {
+      try {
+        var pageEls = document.querySelectorAll(pageSelectors[si]);
+        for (var pj = 0; pj < pageEls.length; pj++) {
+          var pe = pageEls[pj];
+          if (!pe.offsetParent) continue;
+          var pt = (pe.textContent || '').trim();
+          // 精确匹配页码
+          if (pt === pageNum || pt === '第' + pageNum + '页') {
+            pe.scrollIntoView({ behavior: 'instant', block: 'center' });
+            pe.click();
+            return { clicked: true, method: 'page-number', text: pt, page: targetPage };
+          }
+        }
+      } catch(e) {}
+    }
+
+    // 通用回退：在所有可见 a/button 中找文本精确等于目标页码的元素
+    var allEls = document.querySelectorAll('a, button, li[class*="page"]');
+    for (var ai = 0; ai < allEls.length; ai++) {
+      var ae = allEls[ai];
+      if (!ae.offsetParent) continue;
+      if (ae.hasAttribute('disabled')) continue;
+      if (ae.closest('[class*="next"]') || ae.closest('[class*="prev"]')) continue;
+      var at = (ae.textContent || '').trim();
+      if (at === pageNum) {
+        // 确认它在分页容器内
+        var inPagination = ae.closest('[class*="pagination"], [class*="pager"], nav[aria-label*="pagination" i], nav[aria-label*="分页" i]');
+        if (inPagination || /^\d+$/.test(at)) {
+          ae.scrollIntoView({ behavior: 'instant', block: 'center' });
+          ae.click();
+          return { clicked: true, method: 'page-number-fallback', text: at, page: targetPage };
+        }
       }
     }
   }
@@ -1621,11 +1890,13 @@ async function handleMultiPageExtract() {
       // 最后一页，不再翻页
       if (page >= pageCount) break;
 
-      // 点击下一页
-      setStatus("正在翻到第 " + (page + 1) + " 页...", "info");
+      // 点击下一页（优先点「下一页」按钮，不存在则点具体页码）
+      var targetPageNum = page + 1;
+      setStatus("正在翻到第 " + targetPageNum + " 页...", "info");
       var clickResults = await chrome.scripting.executeScript({
         target: { tabId: tabId },
         func: clickNextPageOnPage,
+        args: [targetPageNum, customNextPageXPath],
       });
 
       var clicked = clickResults && clickResults[0] && clickResults[0].result && clickResults[0].result.clicked;
