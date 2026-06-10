@@ -450,6 +450,32 @@ body {
   margin-bottom: 2px;
 }
 
+.h-mode-tag {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 6px;
+  border-radius: 3px;
+  margin-right: 5px;
+  vertical-align: middle;
+  line-height: 1.5;
+}
+
+.h-mode-tag.h-mode-auto {
+  background: #dbeafe;
+  color: #1d4ed8;
+}
+
+.h-mode-tag.h-mode-manual {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.h-mode-tag.h-mode-fullpage {
+  background: #f3e8ff;
+  color: #7c3aed;
+}
+
 .history-item-meta {
   font-size: 10px;
   color: #94a3b8;

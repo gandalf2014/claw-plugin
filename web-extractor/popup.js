@@ -518,10 +518,11 @@ async function handleRetryNarrow() {
   try {
     const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tabs || tabs.length === 0) { showError("无法获取当前标签页"); return; }
+    var tabId = tabs[0].id;
 
     setStatus("正在缩小选择范围...", "info");
     const narrowResults = await chrome.scripting.executeScript({
-      target: { tabId: tabs[0].id },
+      target: { tabId: tabId },
       func: narrowSelectionScope,
     });
     var newCount = (narrowResults && narrowResults[0] && typeof narrowResults[0].result === "number")
@@ -535,9 +536,23 @@ async function handleRetryNarrow() {
 
     selectedCount = newCount;
     updateSelectButton();
-    setStatus("已缩小到 " + newCount + " 个元素，正在重新提取...", "info");
+    setStatus("已缩小到 " + newCount + " 个元素，正在根据新元素优化提取指令...", "info");
 
-    // 触发提取
+    // 获取缩小后选中元素的文本内容，用于优化提取指令
+    var textResults = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: getSelectedElementTexts,
+    });
+    if (textResults && textResults[0] && textResults[0].result) {
+      var texts = textResults[0].result;
+      if (texts.length > 0) {
+        // 传入已有指令，让 LLM 在旧指令基础上精炼优化
+        var oldInstruction = DOM.txtInstruction.value.trim();
+        await autoGenerateInstruction(texts, false, oldInstruction);
+      }
+    }
+
+    setStatus("已缩小到 " + newCount + " 个元素，正在重新提取...", "info");
     handleExtract();
   } catch (err) {
     showError("重试失败：" + err.message);
@@ -662,7 +677,7 @@ async function handleExtract() {
       lastSavedInstruction = instruction;
       lastSavedSystemPrompt = config.systemPrompt;
       updateSaveRuleButton(lastSavedInstruction);
-      cleanupAfterExtract(isSelectedExtract);
+      // 注意：不在此处清理选中元素，保留选中状态以便用户使用"缩小重试"功能
     }
   } catch (err) {
     console.error("Extraction error:", err);
@@ -673,7 +688,7 @@ async function handleExtract() {
     // 断开 keepalive 连接
     try { keepAlivePort.disconnect(); } catch(e) {}
     DOM.btnExtract.disabled = false;
-    DOM.btnRetryNarrow.disabled = false;
+    DOM.btnRetryNarrow.disabled = (selectedCount <= 0);
     DOM.btnScrollHint.classList.add("hidden");
     setTimeout(() => { hideStatus(); hideProgress(); }, 3000);
   }
@@ -1252,4 +1267,19 @@ function narrowSelectionScope() {
   }
 
   return newCount;
+}
+
+// ================================================================
+// 注入函数：getSelectedElementTexts — 获取选中元素的文本内容
+// 用于缩小重试时根据新元素优化提取指令
+// ================================================================
+
+function getSelectedElementTexts() {
+  var els = document.querySelectorAll('[data-we-selected="true"]');
+  var texts = [];
+  for (var i = 0; i < els.length && i < 30; i++) {
+    var t = (els[i].textContent || '').replace(/\s+/g, ' ').trim();
+    if (t.length > 0) texts.push(t.length > 300 ? t.substring(0, 297) + '...' : t);
+  }
+  return texts;
 }
