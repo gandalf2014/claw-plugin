@@ -67,6 +67,7 @@ async function autoGenerateInstruction(elementTexts, shouldAutoExtract, existing
     if (instruction && instruction.length > 5) {
       DOM.txtInstruction.value = instruction;
       instructionFromStorage = false;
+      updateMultiExtractButton();
       if (shouldAutoExtract) {
         setStatus("AI 已根据选中元素自动生成提取指令，正在自动开始提取...", "success");
         setTimeout(function() { handleExtract(); }, 300);
@@ -162,6 +163,7 @@ function fallbackGenerateInstruction(elementTexts, shouldAutoExtract, existingIn
 
   DOM.txtInstruction.value = instruction;
   instructionFromStorage = false;
+  updateMultiExtractButton();
   if (shouldAutoExtract) {
     setStatus("已根据元素内容自动填写提取指令，正在自动开始提取...", "info");
     setTimeout(function() { handleExtract(); }, 300);

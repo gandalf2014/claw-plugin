@@ -24,6 +24,9 @@ const DOM = {
   btnDownload:    document.getElementById("btnDownload"),
   btnSaveRule:    document.getElementById("btnSaveRule"),
   btnRetryNarrow: document.getElementById("btnRetryNarrow"),
+  btnMultiExtract:document.getElementById("btnMultiExtract"),
+  pageCount:      document.getElementById("pageCount"),
+  paginationStatus: document.getElementById("paginationStatus"),
   statusBar:      document.getElementById("statusBar"),
   statusText:     document.getElementById("statusText"),
   progressBar:    document.getElementById("progressBar"),
@@ -56,6 +59,12 @@ let instructionFromStorage = false;
 let autoDetectionDone = false;
 let areaSections = [];
 let currentAreaIndex = 0;
+let paginationDetected = false;
+let paginationInfo = null;
+let multiPageExtracting = false;
+
+// ---- 工具函数 ----
+function _sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
 
 // ---- 初始化 ----
 document.addEventListener("DOMContentLoaded", async () => {
@@ -65,6 +74,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   bindEvents();
   listenForSelectionComplete();
   await checkSelectedElements();
+  updateMultiExtractButton();
 });
 
 // ---- 事件绑定 ----
@@ -83,6 +93,7 @@ function bindEvents() {
 
   DOM.txtInstruction.addEventListener("input", () => {
     instructionFromStorage = false;
+    updateMultiExtractButton();
   });
 
   DOM.btnSelect.addEventListener("click", toggleSelectionMode);
@@ -102,6 +113,13 @@ function bindEvents() {
 
   DOM.btnSaveRule.addEventListener("click", () => {
     handleSaveRule(lastSavedInstruction, lastSavedSystemPrompt);
+  });
+
+  DOM.btnMultiExtract.addEventListener("click", handleMultiPageExtract);
+  DOM.pageCount.addEventListener("change", () => {
+    var v = parseInt(DOM.pageCount.value, 10);
+    if (isNaN(v) || v < 1) DOM.pageCount.value = 1;
+    else if (v > 50) DOM.pageCount.value = 50;
   });
 
   DOM.historyToggle.addEventListener("click", toggleHistory);
@@ -185,7 +203,12 @@ function listenForSelectionComplete() {
     if (request.type === "selectionComplete") {
       isSelecting = false;
       updateSelectButton();
-      checkSelectedElements();
+      checkSelectedElements().then(() => {
+        // 选区完成后检测翻页
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          if (tabs && tabs.length > 0) checkPagination(tabs[0].id);
+        });
+      });
     }
   });
 }
@@ -254,6 +277,44 @@ function updateSelectButton() {
     DOM.btnExtract.textContent = "开始提取";
     DOM.btnExtract.style.background = "";
   }
+  updateMultiExtractButton();
+}
+
+// ---- 翻页提取按钮状态 ---- 
+function updateMultiExtractButton() {
+  if (!DOM.btnMultiExtract) return;
+  var hasInstruction = DOM.txtInstruction.value.trim().length > 0;
+  var hasContent = selectedCount > 0 || autoDetectionDone;
+  DOM.btnMultiExtract.disabled = !(hasInstruction && hasContent && !multiPageExtracting);
+  
+  // 更新分页状态提示
+  if (paginationDetected && paginationInfo) {
+    DOM.paginationStatus.textContent = paginationInfo.text ? '检测到翻页: ' + paginationInfo.text : '检测到翻页';
+    DOM.paginationStatus.style.color = '#16a34a';
+  } else if (hasContent) {
+    DOM.paginationStatus.textContent = '未检测到翻页';
+    DOM.paginationStatus.style.color = '#94a3b8';
+  } else {
+    DOM.paginationStatus.textContent = '';
+  }
+}
+
+// ---- 检测页面分页 ---- 
+async function checkPagination(tabId) {
+  try {
+    var results = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: detectPaginationOnPage,
+    });
+    if (results && results[0] && results[0].result) {
+      paginationInfo = results[0].result;
+      paginationDetected = paginationInfo.found;
+    }
+  } catch(e) {
+    paginationDetected = false;
+    paginationInfo = null;
+  }
+  updateMultiExtractButton();
 }
 
 // ---- 选择模式切换 ----
@@ -361,7 +422,7 @@ function injectSelectionMode() {
       if (st) st.remove();
     }
 
-    function _selCancel() { _selClearAll(); cleanupUI(); try { chrome.runtime.sendMessage({ type: 'selectionComplete' }); } catch(e) {} }
+    function _selCancel() { _selClearAll(); cleanupUI(); /* 取消不发送 selectionComplete，避免重新弹出 popup */ }
     function _selComplete() { cleanupUI(); try { chrome.runtime.sendMessage({ type: 'selectionComplete' }); } catch(e) {} }
 
     function _selOnMouseMove(e) {
@@ -954,6 +1015,8 @@ async function selectArea(tabId, areaIndex) {
       autoGenerateInstruction(autoTexts);
     }
   }
+  // 检测翻页
+  checkPagination(tabId);
   updateAreaPickerHighlight();
   setTimeout(hideStatus, 3000);
 }
@@ -1282,4 +1345,348 @@ function getSelectedElementTexts() {
     if (t.length > 0) texts.push(t.length > 300 ? t.substring(0, 297) + '...' : t);
   }
   return texts;
+}
+
+// ================================================================
+// 注入函数：detectPaginationOnPage — 检测页面翻页组件
+// ================================================================
+
+function detectPaginationOnPage() {
+  var NEXT_SELECTORS = [
+    'a[rel="next"]',
+    'link[rel="next"]',
+    '[aria-label*="next" i]:not([aria-label*="previous" i])',
+    '[aria-label*="Next" i]:not([aria-label*="Previous" i])',
+    '[aria-label*="下一页"]',
+    '[aria-label*="下一頁"]',
+    '[class*="pagination"] [class*="next"]:not(.disabled)',
+    '[class*="pagination"] a[class*="next"]:not([class*="disabled"])',
+    '[class*="pager"] [class*="next"]:not(.disabled)',
+    '.ant-pagination-next:not(.ant-pagination-disabled)',
+    '.el-pagination button.btn-next:not([disabled])',
+    '.el-pagination .btn-next:not([disabled])',
+    '.t-pagination__btn-next:not(.t-is-disabled)',
+    '.arco-pagination-item-next:not(.arco-pagination-item-disabled)',
+    'nav[aria-label*="pagination" i] a[href]:last-of-type',
+    'nav[aria-label*="分页" i] a[href]:last-of-type',
+    '[data-testid*="next-page"]',
+    '[data-testid*="pagination-next"]',
+    'ul.pagination li.next a:not(.disabled)',
+  ];
+
+  // 尝试 CSS 选择器
+  for (var i = 0; i < NEXT_SELECTORS.length; i++) {
+    try {
+      var els = document.querySelectorAll(NEXT_SELECTORS[i]);
+      for (var j = 0; j < els.length; j++) {
+        var el = els[j];
+        if (!el.offsetParent && el.tagName.toLowerCase() !== 'link') continue;
+        if (el.hasAttribute('disabled')) continue;
+        if (el.getAttribute('aria-disabled') === 'true') continue;
+        var text = (el.textContent || el.getAttribute('aria-label') || '').trim().substring(0, 40);
+        return { found: true, selector: NEXT_SELECTORS[i], tag: el.tagName.toLowerCase(), text: text };
+      }
+    } catch(e) {}
+  }
+
+  // 文本匹配回退
+  var NEXT_TEXTS = ['next', '下一页', '下一頁', '>', '›', '»', 'next page', '下页'];
+  var candidates = document.querySelectorAll('a, button, span[role="button"], div[role="button"]');
+  for (var k = 0; k < candidates.length; k++) {
+    var c = candidates[k];
+    if (!c.offsetParent) continue;
+    if (c.hasAttribute('disabled')) continue;
+    if (c.getAttribute('aria-disabled') === 'true') continue;
+    var ct = (c.textContent || '').trim().toLowerCase();
+    for (var ti = 0; ti < NEXT_TEXTS.length; ti++) {
+      if (ct === NEXT_TEXTS[ti]) {
+        return { found: true, selector: 'text-match', tag: c.tagName.toLowerCase(), text: (c.textContent || '').trim().substring(0, 40) };
+      }
+    }
+  }
+
+  return { found: false };
+}
+
+// ================================================================
+// 注入函数：clickNextPageOnPage — 点击翻页按钮
+// ================================================================
+
+function clickNextPageOnPage() {
+  var NEXT_SELECTORS = [
+    'a[rel="next"]',
+    '[class*="pagination"] [class*="next"]:not(.disabled)',
+    '[class*="pagination"] a[class*="next"]:not([class*="disabled"])',
+    '.ant-pagination-next:not(.ant-pagination-disabled)',
+    '.el-pagination button.btn-next:not([disabled])',
+    '.el-pagination .btn-next:not([disabled])',
+    '[aria-label*="next" i]:not([aria-label*="previous" i])',
+    '[aria-label*="下一页"]',
+  ];
+
+  for (var i = 0; i < NEXT_SELECTORS.length; i++) {
+    try {
+      var els = document.querySelectorAll(NEXT_SELECTORS[i]);
+      for (var j = 0; j < els.length; j++) {
+        var el = els[j];
+        if (!el.offsetParent && el.tagName.toLowerCase() !== 'link') continue;
+        if (el.hasAttribute('disabled')) continue;
+        if (el.getAttribute('aria-disabled') === 'true') continue;
+        el.scrollIntoView({ behavior: 'instant', block: 'center' });
+        el.click();
+        return { clicked: true, selector: NEXT_SELECTORS[i], text: (el.textContent || '').trim().substring(0, 40) };
+      }
+    } catch(e) {}
+  }
+
+  // 文本匹配回退
+  var NEXT_TEXTS = ['next', '下一页', '下一頁', '>', '›', '»'];
+  var candidates = document.querySelectorAll('a, button');
+  for (var k = 0; k < candidates.length; k++) {
+    var c = candidates[k];
+    if (!c.offsetParent) continue;
+    if (c.hasAttribute('disabled')) continue;
+    var ct = (c.textContent || '').trim().toLowerCase();
+    for (var ti = 0; ti < NEXT_TEXTS.length; ti++) {
+      if (ct === NEXT_TEXTS[ti]) {
+        c.click();
+        return { clicked: true, selector: 'text-match', text: c.textContent.trim().substring(0, 40) };
+      }
+    }
+  }
+
+  return { clicked: false };
+}
+
+// ================================================================
+// 多页提取核心逻辑
+// ================================================================
+
+/**
+ * 单页提取辅助函数 — 复用 extractPageContent + callLLM，输出格式化 JSON 字符串
+ */
+async function extractSinglePage(instruction, config) {
+  var maxLen = EXTRACTOR_CONSTANTS ? EXTRACTOR_CONSTANTS.DEFAULT_MAX_CONTENT_LENGTH : 20000;
+  try {
+    var synced = await chrome.storage.sync.get("maxContentLength");
+    if (synced.maxContentLength) maxLen = synced.maxContentLength;
+  } catch(e) {}
+
+  var content = await extractPageContent(maxLen);
+  if (!content || content.trim().length === 0) {
+    throw new Error("页面快照为空");
+  }
+  var result = await callLLM(config, instruction, content);
+  return formatJSON(result);
+}
+
+/**
+ * 翻页后等待页面就绪
+ * URL 变化 → 等待 tab 加载完成；URL 不变 → AJAX 翻页，等待内容稳定
+ */
+async function waitForPageReady(tabId, prevUrl) {
+  var maxWait = 25000;
+  var interval = 600;
+  var startTime = Date.now();
+
+  while (Date.now() - startTime < maxWait) {
+    try {
+      var tab = await chrome.tabs.get(tabId);
+
+      if (tab.url !== prevUrl) {
+        // URL 发生变化 — 传统页面跳转
+        if (tab.status === 'complete') {
+          await _sleep(1800); // 额外等待动态内容加载
+          return { ready: true, urlChanged: true };
+        }
+      } else if (tab.status === 'complete') {
+        // URL 未变 — AJAX 翻页，等待内容稳定
+        await _sleep(2500);
+        return { ready: true, urlChanged: false };
+      }
+
+      await _sleep(interval);
+    } catch(e) {
+      return { ready: false, error: e.message };
+    }
+  }
+
+  return { ready: false, error: '页面加载超时' };
+}
+
+/**
+ * 合并多页提取结果
+ */
+function mergePageResults(resultsArray) {
+  if (!resultsArray || resultsArray.length === 0) return '[]';
+  if (resultsArray.length === 1) return resultsArray[0];
+
+  var parsed = [];
+  var allArrays = true;
+  var allObjects = true;
+
+  for (var i = 0; i < resultsArray.length; i++) {
+    try {
+      var obj = JSON.parse(resultsArray[i]);
+      parsed.push(obj);
+      if (!Array.isArray(obj)) allArrays = false;
+      if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) allObjects = false;
+    } catch(e) {
+      parsed.push(resultsArray[i]);
+      allArrays = false;
+      allObjects = false;
+    }
+  }
+
+  // 全部是数组 → 拼接
+  if (allArrays) {
+    var merged = [];
+    for (var j = 0; j < parsed.length; j++) {
+      merged = merged.concat(parsed[j]);
+    }
+    return JSON.stringify(merged, null, 2);
+  }
+
+  // 全部是普通对象 → 包裹为数组
+  if (allObjects) {
+    return JSON.stringify(parsed, null, 2);
+  }
+
+  // 混合类型 → 按页组织
+  return JSON.stringify(parsed, null, 2);
+}
+
+/**
+ * 翻页提取主处理函数
+ */
+async function handleMultiPageExtract() {
+  var instruction = DOM.txtInstruction.value.trim();
+  if (!instruction) {
+    showError("请先输入提取指令");
+    return;
+  }
+  if (multiPageExtracting) return;
+
+  multiPageExtracting = true;
+  DOM.btnMultiExtract.disabled = true;
+  DOM.btnExtract.disabled = true;
+  DOM.btnRetryNarrow.disabled = true;
+  hideError(); hideResult();
+
+  var pageCount = parseInt(DOM.pageCount.value, 10);
+  if (isNaN(pageCount) || pageCount < 1) pageCount = 3;
+  if (pageCount > 50) pageCount = 50;
+
+  var keepAlivePort = chrome.runtime.connect({ name: "keepalive" });
+  var allResults = [];
+  var successCount = 0;
+  var tabId = null;
+  var prevUrl = '';
+
+  try {
+    // 获取配置
+    var config = await getConfig();
+    if (!config.apiKey) { showError("请先在设置页面配置 API Key"); return; }
+    if (!config.baseUrl) { showError("请先在设置页面配置 Base URL"); return; }
+
+    // 获取当前 tab
+    var tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tabs || tabs.length === 0) { showError("无法获取当前标签页"); return; }
+    tabId = tabs[0].id;
+    prevUrl = tabs[0].url;
+
+    // 逐页提取
+    for (var page = 1; page <= pageCount; page++) {
+      setStatus("翻页提取 第 " + page + "/" + pageCount + " 页...", "info");
+      setProgress(Math.round((page - 1) / pageCount * 90));
+
+      // 提取当前页
+      var jsonText = null;
+      try {
+        jsonText = await extractSinglePage(instruction, config);
+        allResults.push(jsonText);
+        successCount++;
+      } catch(extractErr) {
+        console.warn("第 " + page + " 页提取失败:", extractErr);
+        setStatus("第 " + page + " 页提取失败: " + extractErr.message, "warning");
+        // 如果第一页就失败，直接终止
+        if (page === 1) {
+          showError("首页提取失败：" + extractErr.message);
+          return;
+        }
+        // 后续页失败则停止翻页
+        break;
+      }
+
+      // 最后一页，不再翻页
+      if (page >= pageCount) break;
+
+      // 点击下一页
+      setStatus("正在翻到第 " + (page + 1) + " 页...", "info");
+      var clickResults = await chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        func: clickNextPageOnPage,
+      });
+
+      var clicked = clickResults && clickResults[0] && clickResults[0].result && clickResults[0].result.clicked;
+      if (!clicked) {
+        setStatus("未找到翻页按钮，提取完成（已提取 " + successCount + " 页）", "success");
+        break;
+      }
+
+      // 等待页面就绪
+      var readyResult = await waitForPageReady(tabId, prevUrl);
+      if (!readyResult.ready) {
+        setStatus("页面加载超时，提取完成（已提取 " + successCount + " 页）", "warning");
+        break;
+      }
+
+      // 更新当前 URL 用于下次翻页判断
+      try {
+        var updatedTab = await chrome.tabs.get(tabId);
+        prevUrl = updatedTab.url;
+      } catch(e) {}
+
+      // 页面跳转后可能需要重新执行共享脚本（content_scripts 会自动注入），短暂等待
+      if (readyResult.urlChanged) {
+        await _sleep(1000);
+      }
+    }
+
+    // 合并结果
+    setProgress(95);
+    setStatus("正在合并 " + successCount + " 页数据...", "info");
+
+    var mergedJson = mergePageResults(allResults);
+    showResult(mergedJson);
+
+    // 计算并显示空值率
+    var nullRate = calculateNullRate(mergedJson);
+    var nullRatePercent = Math.round(nullRate * 100);
+    lastNullRate = nullRate;
+
+    setProgress(100);
+    if (successCount < pageCount) {
+      setStatus("提取完成：成功 " + successCount + "/" + pageCount + " 页" + (nullRate > 0 ? "（空值率 " + nullRatePercent + "%）" : ""), "success");
+    } else {
+      setStatus("提取完成：全部 " + pageCount + " 页" + (nullRate > 0 ? "（空值率 " + nullRatePercent + "%）" : ""), "success");
+    }
+
+    lastSavedInstruction = instruction;
+    lastSavedSystemPrompt = config.systemPrompt;
+    updateSaveRuleButton(lastSavedInstruction);
+    updateMultiExtractButton();
+
+  } catch(err) {
+    console.error("Multi-page extraction error:", err);
+    showError("翻页提取失败：" + err.message);
+    setStatus("翻页提取失败", "error");
+  } finally {
+    multiPageExtracting = false;
+    try { keepAlivePort.disconnect(); } catch(e) {}
+    DOM.btnExtract.disabled = false;
+    DOM.btnRetryNarrow.disabled = (selectedCount <= 0);
+    updateMultiExtractButton();
+    setTimeout(function() { hideStatus(); hideProgress(); }, 5000);
+  }
 }

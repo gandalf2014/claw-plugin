@@ -71,6 +71,23 @@
       </span>
     </div>
 
+    <!-- Multi-Page Extraction -->
+    <div class="multi-page-row" id="multiPageRow">
+      <div class="page-count-group">
+        <label for="pageCount" class="page-count-label">翻页提取</label>
+        <input type="number" id="pageCount" class="page-count-input" min="1" max="50" value="3" aria-label="提取页数">
+        <span class="page-count-unit">页</span>
+      </div>
+      <span id="paginationStatus" class="pagination-status"></span>
+      <button id="btnMultiExtract" class="btn-multi-extract" disabled title="自动翻页并应用相同规则提取多页数据">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="13 17 18 12 13 7"></polyline>
+          <polyline points="6 17 11 12 6 7"></polyline>
+        </svg>
+        翻页提取
+      </button>
+    </div>
+
     <!-- Auto-Detected Area Picker -->
     <section id="areaPicker" class="area-picker hidden">
       <div class="area-picker-header">
