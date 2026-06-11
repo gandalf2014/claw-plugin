@@ -70,6 +70,28 @@ let customNextPageXPath = null;   // 用户手动指定的翻页按钮 XPath
 // ---- 工具函数 ----
 function _sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
 
+/**
+ * 清理 LLM 返回文本中的 Markdown 代码块并解析为 JSON
+ * 消除 formatJSON / calculateNullRate 中重复的清理逻辑
+ * @param {string|object} raw - LLM 返回的原始文本或对象
+ * @returns {{ obj: object|null, text: string }} 解析结果和清理后文本
+ */
+function cleanAndParseJSON(raw) {
+  var text;
+  if (typeof raw === "string") {
+    text = raw.trim();
+    var mdMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+    if (mdMatch) text = mdMatch[1].trim();
+  } else {
+    text = JSON.stringify(raw, null, 2);
+  }
+  try {
+    return { obj: JSON.parse(text), text: text };
+  } catch (_) {
+    return { obj: null, text: typeof raw === "string" ? raw : JSON.stringify(raw, null, 2) };
+  }
+}
+
 // ---- 初始化 ----
 document.addEventListener("DOMContentLoaded", async () => {
   await loadSavedInstruction();
@@ -367,41 +389,57 @@ function toggleSelectionMode() {
     updateSelectButton();
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs || tabs.length === 0) return;
-      try { chrome.tabs.sendMessage(tabs[0].id, { type: "stopSelection" }); } catch(e) {}
-      chrome.scripting.executeScript({
-        target: { tabId: tabs[0].id },
-        func: cleanupSelectionMode,
-      }, () => {});
+      chrome.tabs.sendMessage(tabs[0].id, { type: "stopSelection" }, () => {
+        if (chrome.runtime.lastError) {
+          // 如果 sendMessage 失败（content script 未加载），
+          // 回退到直接注入清理函数
+          chrome.scripting.executeScript({
+            target: { tabId: tabs[0].id },
+            func: cleanupSelectionMode,
+          }, () => {});
+        }
+      });
     });
   } else {
     clearAreaPicker();
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs || tabs.length === 0) { showError("无法获取当前标签页"); return; }
-      chrome.scripting.executeScript({
-        target: { tabId: tabs[0].id },
-        func: injectSelectionMode,
-      }, (results) => {
-        if (chrome.runtime.lastError) {
-          showError("注入失败：" + chrome.runtime.lastError.message + "。请刷新页面后重试。");
+      // 委托 content.js 的 startSelectionMode 启动选择模式
+      chrome.tabs.sendMessage(tabs[0].id, { type: "startSelection" }, (response) => {
+        if (chrome.runtime.lastError || !response || !response.success) {
+          // content script 不可用（如旧标签页），回退到直接注入
+          chrome.scripting.executeScript({
+            target: { tabId: tabs[0].id },
+            func: injectSelectionModeFallback,
+          }, (results) => {
+            if (chrome.runtime.lastError) {
+              showError("注入失败：" + chrome.runtime.lastError.message + "。请刷新页面后重试。");
+              return;
+            }
+            if (results && results[0] && results[0].result) {
+              isSelecting = true;
+              updateSelectButton();
+              window.close();
+            } else {
+              showError("无法启动选择模式，请刷新页面后重试");
+            }
+          });
           return;
         }
-        if (results && results[0] && results[0].result) {
-          isSelecting = true;
-          updateSelectButton();
-          window.close();
-        } else {
-          showError("无法启动选择模式，请刷新页面后重试");
-        }
+        isSelecting = true;
+        updateSelectButton();
+        window.close();
       });
     });
   }
 }
 
 // ================================================================
-// 注入函数：选择模式（自包含，不依赖外部变量）
+// 注入函数：选择模式回退（仅 content.js 不可用时使用，如旧标签页）
+// 与 content.js 的 startSelectionMode 功能等价，自包含
 // ================================================================
 
-function injectSelectionMode() {
+function injectSelectionModeFallback() {
   var SEL_ATTR = 'data-we-selected';
   var SEL_STYLE_ID = 'we-extractor-selection-style';
   var SEL_TOOLBAR_ID = 'we-extractor-toolbar';
@@ -547,15 +585,8 @@ const NULL_RATE_THRESHOLD = 0.3;
  */
 function calculateNullRate(jsonText) {
   try {
-    var obj;
-    if (typeof jsonText === "string") {
-      var cleaned = jsonText.trim();
-      var mdMatch = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-      if (mdMatch) cleaned = mdMatch[1].trim();
-      obj = JSON.parse(cleaned);
-    } else {
-      obj = jsonText;
-    }
+    var parsed = cleanAndParseJSON(jsonText);
+    var obj = parsed.obj;
     if (!obj) return 1;
 
     var total = 0, nullCount = 0;
@@ -904,18 +935,9 @@ async function callLLM(config, instruction, content, options) {
 
 // ---- JSON 格式化 ----
 function formatJSON(raw) {
-  try {
-    var obj;
-    if (typeof raw === "string") {
-      var cleaned = raw.trim();
-      var mdMatch = cleaned.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-      if (mdMatch) cleaned = mdMatch[1].trim();
-      obj = JSON.parse(cleaned);
-    } else { obj = raw; }
-    return JSON.stringify(obj, null, 2);
-  } catch (_) {
-    return typeof raw === "string" ? raw : JSON.stringify(raw, null, 2);
-  }
+  var result = cleanAndParseJSON(raw);
+  if (result.obj) return JSON.stringify(result.obj, null, 2);
+  return result.text;
 }
 
 // ---- 复制 ----
@@ -1134,6 +1156,7 @@ async function waitForPageReady(tabId, prevUrl) {
   var pollInterval = 400;
   var stableThreshold = 3;
   var startTime = Date.now();
+  var urlActuallyChanged = false;
 
   // 先等待 URL 变化型翻页完成
   var urlChangePhase = true;
@@ -1143,6 +1166,7 @@ async function waitForPageReady(tabId, prevUrl) {
 
       if (tab.url !== prevUrl) {
         // URL 发生变化 — 传统页面跳转
+        urlActuallyChanged = true;
         if (tab.status === 'complete') {
           await _sleep(800); // 页面基础渲染完成
           urlChangePhase = false;
@@ -1185,7 +1209,7 @@ async function waitForPageReady(tabId, prevUrl) {
         stableCount++;
         if (stableCount >= stableThreshold) {
           await _sleep(300); // 最后给一点喘息时间
-          return { ready: true, urlChanged: false };
+          return { ready: true, urlChanged: urlActuallyChanged };
         }
       } else {
         stableCount = 0;
@@ -1198,7 +1222,7 @@ async function waitForPageReady(tabId, prevUrl) {
   }
 
   // 超时但页面可能已经稳定，返回 ready
-  return { ready: true, urlChanged: false };
+  return { ready: true, urlChanged: urlActuallyChanged };
 }
 
 /**

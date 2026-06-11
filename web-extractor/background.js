@@ -132,7 +132,7 @@ async function handleLLMCall(request, sender) {
       try {
         var urlObj = new URL(rawUrl);
         // 剔除敏感查询参数，防止 token/key/密码等泄露到 LLM API
-        var sensitiveParams = /^(token|key|secret|password|passwd|auth|session|sid|access_token|api_key|apikey|sign|signature|credential|jwt)$/i;
+        var sensitiveParams = /^(token|key|secret|password|passwd|auth|session|sid|access_token|api_key|apikey|sign|signature|credential|jwt|auth_token|sso_key|_ticket|ticket|csrf_token|xsrf_token|bearer)$/i;
         var params = urlObj.searchParams;
         var keysToDelete = [];
         params.forEach(function(_, k) {
@@ -149,7 +149,9 @@ async function handleLLMCall(request, sender) {
   }
 
   // 构建请求体
-  var fullSystemPrompt = systemPrompt + "\n\n当前页面URL: " + pageUrl;
+  // 防止超长 URL 撑爆 prompt（取域名+路径前 500 字符）
+  var truncatedUrl = pageUrl.length > 500 ? pageUrl.substring(0, 497) + "..." : pageUrl;
+  var fullSystemPrompt = systemPrompt + "\n\n当前页面URL: " + truncatedUrl;
 
   var messages = [
     {

@@ -75,7 +75,7 @@ test.describe('Popup 弹窗页面', () => {
   });
 
   test('下载格式选择器存在', async ({ page }) => {
-    await expect(page.locator('#selDownloadFormat')).toHaveCount(1);
+    await expect(page.locator('#formatSwitcher')).toHaveCount(1);
   });
 
   test('未输入指令直接提取显示错误', async ({ page }) => {

@@ -168,7 +168,6 @@ function autoSelectInSection(sectionIndex) {
   if (!document.getElementById("we-auto-select-style")) {
     (window._WE && window._WE.injectSelectionStyles) ? window._WE.injectSelectionStyles('AI  主要区域', true) : null;
   }
-  }
 
   var pos = getComputedStyle(section).position;
   if (pos === "static") section.style.position = "relative";
@@ -226,10 +225,10 @@ function narrowSelectionScope() {
 
   if (candidates.length === 0) return 0;
 
-  // 按文本长度降序排列，保留文本密度最高的前 N 个
+  // 按文本长度降序排列，保留文本内容最丰富的前 N 个
   candidates.sort(function(a, b) { return b.textLen - a.textLen; });
 
-  // 保留文本内容最丰富的前 60%（至少保留 1 个，最多保留 15 个）
+  // 保留文本最丰富的前 60%（至少保留 1 个，最多保留 15 个）
   var keepCount = Math.max(1, Math.min(15, Math.ceil(candidates.length * 0.6)));
 
   // 注入选中样式（复用共享函数）

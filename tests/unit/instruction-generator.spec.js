@@ -19,8 +19,11 @@ test.beforeAll(() => {
       DOM: mockDOM,
       setStatus: () => {},
       hideStatus: () => {},
+      updateMultiExtractButton: () => {},
+      updateSaveRuleButton: () => {},
       getConfig: async () => ({ apiKey: '', baseUrl: '' }),
       callLLM: async () => { throw new Error('no LLM'); },
+      handleExtract: () => {},
       instructionFromStorage: false,
       chrome: {
         storage: {
