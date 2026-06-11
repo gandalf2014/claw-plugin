@@ -1735,7 +1735,7 @@ function clickNextPageOnPage(targetPage, customXPath) {
  * 单页提取辅助函数 — 复用 extractPageContent + callLLM，输出格式化 JSON 字符串
  */
 async function extractSinglePage(instruction, config) {
-  var maxLen = EXTRACTOR_CONSTANTS ? EXTRACTOR_CONSTANTS.DEFAULT_MAX_CONTENT_LENGTH : 20000;
+  var maxLen = EXTRACTOR_CONSTANTS ? EXTRACTOR_CONSTANTS.DEFAULT_MAX_CONTENT_LENGTH : 50000;
   try {
     var synced = await chrome.storage.sync.get("maxContentLength");
     if (synced.maxContentLength) maxLen = synced.maxContentLength;
