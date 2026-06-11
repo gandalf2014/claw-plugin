@@ -331,41 +331,9 @@ function updateSaveRuleButton(lastSavedInstruction) {
 // ============================================================
 
 function getSelectedElementXPaths() {
+  // 复用 shared-extractor 的 getXPath（统一 XPath 计算逻辑）
   function _getXPath(el) {
-    if (!el || el.nodeType !== 1) return null;
-    // 优先使用 ID（ID 在页面中应唯一）
-    if (el.id) {
-      return '//*[@id="' + el.id.replace(/"/g, '\\"') + '"]';
-    }
-    var parts = [];
-    var current = el;
-    while (current && current.nodeType === 1) {
-      var tag = current.nodeName.toLowerCase();
-      var parent = current.parentNode;
-      if (!parent || parent.nodeType !== 1) {
-        parts.unshift(tag);
-        break;
-      }
-      // 统计同标签兄弟节点数量
-      var sameTagSiblings = [];
-      var childNodes = parent.childNodes;
-      for (var i = 0; i < childNodes.length; i++) {
-        if (childNodes[i].nodeType === 1 && childNodes[i].nodeName === current.nodeName) {
-          sameTagSiblings.push(childNodes[i]);
-        }
-      }
-      if (sameTagSiblings.length > 1) {
-        var index = 1;
-        for (var j = 0; j < sameTagSiblings.length; j++) {
-          if (sameTagSiblings[j] === current) { index = j + 1; break; }
-        }
-        parts.unshift(tag + '[' + index + ']');
-      } else {
-        parts.unshift(tag);
-      }
-      current = parent;
-    }
-    return '/' + parts.join('/');
+    return (window._WE && window._WE.getXPath) ? window._WE.getXPath(el) : null;
   }
 
   var els = document.querySelectorAll('[data-we-selected="true"]');
@@ -393,17 +361,9 @@ function selectElementsByXPaths(xpaths) {
     oldSelected[i].style.borderRadius = '';
   }
 
-  // 确保选中样式已注入
+  // 复用共享函数注入选中样式
   if (!document.getElementById('we-auto-select-style')) {
-    var styleEl = document.createElement('style');
-    styleEl.id = 'we-auto-select-style';
-    styleEl.textContent =
-      "[data-we-selected='true'] {" +
-      "  outline: 3px solid #16a34a !important; outline-offset: 3px !important;" +
-      "  box-shadow: 0 0 0 6px rgba(22,163,74,0.15), 0 0 20px rgba(22,163,74,0.3) !important;" +
-      "  background-color: rgba(22,163,74,0.04) !important; border-radius: 4px !important;" +
-      "}";
-    document.head.appendChild(styleEl);
+    (window._WE && window._WE.injectSelectionStyles) ? window._WE.injectSelectionStyles(null, false) : null;
   }
 
   var count = 0;

@@ -2,13 +2,15 @@
 // popup.js — 弹窗编排逻辑（精简版）
 //
 // 已拆分模块：
-//   shared-prompt.js     → 默认 System Prompt
-//   constants.js         → 全局配置常量
-//   utils.js             → 通用工具函数
-//   csv-utils.js         → JSON → CSV 转换
-//   xlsx-builder.js      → JSON → XLSX 内联生成器
-//   history.js           → 提取历史记录管理
-//   instruction-generator.js → 自动指令生成
+//   shared-prompt.js          → 默认 System Prompt
+//   constants.js              → 全局配置常量
+//   utils.js                  → 通用工具函数
+//   csv-utils.js              → JSON → CSV 转换
+//   xlsx-builder.js           → JSON → XLSX 内联生成器
+//   history.js                → 提取历史记录管理
+//   instruction-generator.js  → 自动指令生成
+//   area-inject.js            → 页面区域检测与选择注入函数
+//   pagination-inject.js      → 翻页检测与跳转注入函数
 //
 // shared-extractor.js 通过 executeScript files 注入页面
 // ============================================================
@@ -332,6 +334,7 @@ async function checkPagination(tabId) {
       paginationDetected = paginationInfo.found;
     }
   } catch(e) {
+    console.debug("[popup] checkPagination failed:", e.message || e);
     paginationDetected = false;
     paginationInfo = null;
   }
@@ -527,27 +530,6 @@ function injectSelectionMode() {
     _selUpdateCount();
     return true;
   } catch(e) { return false; }
-}
-
-function cleanupSelectionMode() {
-  try {
-    var ids = ['we-extractor-toolbar', 'we-extractor-selection-style', 'we-auto-select-style'];
-    for (var i = 0; i < ids.length; i++) {
-      var el = document.getElementById(ids[i]);
-      if (el) el.remove();
-    }
-    document.body.classList.remove('we-selecting');
-    var hs = document.querySelectorAll('.we-sel-hover');
-    for (var j = 0; j < hs.length; j++) hs[j].classList.remove('we-sel-hover');
-    var selected = document.querySelectorAll('[data-we-selected="true"]');
-    for (var k = 0; k < selected.length; k++) {
-      selected[k].removeAttribute('data-we-selected');
-      selected[k].style.outline = '';
-      selected[k].style.boxShadow = '';
-      selected[k].style.backgroundColor = '';
-      selected[k].style.borderRadius = '';
-    }
-  } catch(e) {}
 }
 
 // ================================================================
@@ -1122,612 +1104,6 @@ function updateAreaPickerHighlight() {
 }
 
 // ================================================================
-// 注入函数：analyzePageStructure（自包含）
-// ================================================================
-
-function analyzePageStructure() {
-  var SKIP_TAGS = { script:1, style:1, svg:1, noscript:1, iframe:1, canvas:1, video:1, audio:1, template:1, link:1, meta:1, br:1, hr:1, wbr:1, title:1 };
-
-  function isVisible(el) {
-    if (!el || el.nodeType !== 1) return false;
-    if (SKIP_TAGS.hasOwnProperty(el.tagName.toLowerCase())) return false;
-    var s = getComputedStyle(el);
-    if (s.display === "none" || s.visibility === "hidden" || s.opacity === "0") return false;
-    if (el.hasAttribute("hidden") || el.getAttribute("aria-hidden") === "true") return false;
-    return true;
-  }
-
-  function isContainer(el) {
-    var children = 0, textLen = 0;
-    for (var i = 0; i < el.children.length; i++) { if (isVisible(el.children[i])) children++; }
-    textLen = (el.textContent ? el.textContent.replace(/\s+/g, " ").trim() : "").length;
-    return (children >= 2) || (textLen >= 100);
-  }
-
-  function getTextPreview(el, maxLen) {
-    maxLen = maxLen || 200;
-    var t = (el.textContent || "").replace(/\s+/g, " ").trim();
-    if (t.length > maxLen) t = t.substring(0, maxLen - 3) + "...";
-    return t;
-  }
-
-  function getClassSummary(el) {
-    var cls = el.className;
-    if (typeof cls !== "string" || !cls.trim()) return "";
-    return cls.trim().split(/\s+/).slice(0, 3).join(" ");
-  }
-
-  function isNonContent(el) {
-    var tag = el.tagName.toLowerCase();
-    var role = (el.getAttribute("role") || "").toLowerCase();
-    var cls = (el.className || "").toLowerCase();
-    var id = (el.id || "").toLowerCase();
-    if (tag === "nav" || tag === "header" || tag === "footer" || tag === "aside") return true;
-    if (role === "navigation" || role === "banner" || role === "contentinfo" || role === "complementary") return true;
-    if (/^(nav|header|footer|sidebar|aside|menu|toolbar|breadcrumb|copyright)/.test(id)) return true;
-    if (/\b(nav|header|footer|sidebar|aside|menu|toolbar|breadcrumb|copyright|ad-|advertisement|banner-ad|popup|modal|overlay|drawer)\b/.test(cls)) return true;
-    var textLen = (el.textContent || "").replace(/\s+/g, " ").trim().length;
-    var childCount = 0;
-    for (var nc = 0; nc < el.children.length; nc++) {
-      var cc = el.children[nc];
-      if (cc.nodeType === 1) { var s2 = getComputedStyle(cc); if (s2.display !== "none" && s2.visibility !== "hidden") childCount++; }
-    }
-    if (childCount > 15 && textLen > 0 && textLen / childCount < 10) return true;
-    return false;
-  }
-
-  var root = document.querySelector("main, [role='main']") || document.querySelector("article, [role='article']") || document.body;
-  if (!root) root = document.documentElement;
-
-  var sections = [];
-  var sectionCounter = 0;
-
-  function walkChildren(parent, depth) {
-    if (depth > 10 || sectionCounter >= 30) return;
-    var children = parent.children;
-    for (var i = 0; i < children.length; i++) {
-      if (sectionCounter >= 30) break;
-      var child = children[i];
-      if (!isVisible(child)) continue;
-      if (isNonContent(child)) continue;
-
-      var tag = child.tagName.toLowerCase();
-      var preview = getTextPreview(child, 150);
-      if (preview.length < 5) continue;
-
-      var childCount = 0;
-      for (var j = 0; j < child.children.length; j++) { if (isVisible(child.children[j])) childCount++; }
-
-      var isSection = false;
-      if (["main", "article", "section"].indexOf(tag) >= 0) isSection = true;
-      var role = child.getAttribute("role");
-      if (role && ["main", "article", "region"].indexOf(role) >= 0) isSection = true;
-      var cls = (child.className || "").toLowerCase();
-      if (/content|main|article|body|wrapper|container|list|grid|results|products/.test(cls) && childCount >= 2) isSection = true;
-      if (childCount >= 5 && preview.length >= 50) isSection = true;
-      if (preview.length >= 200) isSection = true;
-
-      if (isSection) {
-        var rect = child.getBoundingClientRect();
-        child.setAttribute("data-we-section", String(sectionCounter));
-        sections.push({
-          index: sectionCounter, tag: tag, idAttr: child.id || "",
-          className: getClassSummary(child), textPreview: preview,
-          childCount: childCount, depth: depth, area: Math.round(rect.width * rect.height),
-        });
-        sectionCounter++;
-      } else if (isContainer(child)) {
-        walkChildren(child, depth + 1);
-      }
-    }
-  }
-
-  walkChildren(root, 0);
-  if (sections.length <= 1 && root === document.body) { sectionCounter = 0; sections = []; walkChildren(document.body, 0); }
-
-  sections.sort(function(a, b) { return b.area - a.area; });
-  for (var si = 0; si < sections.length; si++) {
-    var oldIndex = sections[si].index;
-    var el = document.querySelector('[data-we-section="' + oldIndex + '"]');
-    if (el) el.setAttribute("data-we-section", String(si));
-    sections[si].index = si;
-  }
-
-  return { title: document.title || "", url: window.location.href, sectionCount: sections.length, sections: sections };
-}
-
-// ================================================================
-// 注入函数：autoSelectInSection（自包含）
-// ================================================================
-
-function autoSelectInSection(sectionIndex) {
-  var section = document.querySelector('[data-we-section="' + sectionIndex + '"]');
-  if (!section) return 0;
-
-  var allSections = document.querySelectorAll("[data-we-section]");
-  for (var ai = 0; ai < allSections.length; ai++) allSections[ai].removeAttribute("data-we-section");
-
-  var oldSelected = document.querySelectorAll('[data-we-selected="true"]');
-  for (var os = 0; os < oldSelected.length; os++) {
-    oldSelected[os].removeAttribute("data-we-selected");
-    oldSelected[os].style.outline = "";
-    oldSelected[os].style.boxShadow = "";
-    oldSelected[os].style.backgroundColor = "";
-    oldSelected[os].style.borderRadius = "";
-  }
-
-  if (!document.getElementById("we-auto-select-style")) {
-    var styleEl = document.createElement("style");
-    styleEl.id = "we-auto-select-style";
-    styleEl.textContent =
-      "[data-we-selected='true'] {" +
-      "  outline: 3px solid #16a34a !important; outline-offset: 3px !important;" +
-      "  box-shadow: 0 0 0 6px rgba(22,163,74,0.15), 0 0 20px rgba(22,163,74,0.3) !important;" +
-      "  background-color: rgba(22,163,74,0.04) !important; border-radius: 4px !important;" +
-      "  animation: we-pulse 2s ease-in-out infinite !important;" +
-      "}" +
-      "@keyframes we-pulse {" +
-      "  0%, 100% { box-shadow: 0 0 0 6px rgba(22,163,74,0.15), 0 0 20px rgba(22,163,74,0.3); }" +
-      "  50% { box-shadow: 0 0 0 10px rgba(22,163,74,0.08), 0 0 30px rgba(22,163,74,0.5); }" +
-      "}" +
-      "[data-we-selected='true']::before {" +
-      "  content: 'AI  主要区域'; position: absolute; top: -32px; left: 4px;" +
-      "  background: #16a34a; color: #fff; font-size: 12px; font-weight: 600;" +
-      "  padding: 2px 10px; border-radius: 4px; z-index: 2147483647;" +
-      "  pointer-events: none; white-space: nowrap;" +
-      "}";
-    document.head.appendChild(styleEl);
-  }
-
-  var pos = getComputedStyle(section).position;
-  if (pos === "static") section.style.position = "relative";
-
-  section.setAttribute("data-we-selected", "true");
-  if (section.scrollIntoView) section.scrollIntoView({ behavior: "smooth", block: "center" });
-  return 1;
-}
-
-// ================================================================
-// 注入函数：narrowSelectionScope — 缩小选中元素范围
-// 将当前选中的大区域拆解为其直接可见子元素，只保留文本密度最高的子集
-// ================================================================
-
-function narrowSelectionScope() {
-  var SEL_ATTR = 'data-we-selected';
-
-  // 收集当前选中的元素
-  var selected = document.querySelectorAll('[' + SEL_ATTR + '="true"]');
-  if (selected.length === 0) return 0;
-
-  // 清除旧选中样式
-  for (var ci = 0; ci < selected.length; ci++) {
-    selected[ci].removeAttribute(SEL_ATTR);
-    selected[ci].style.outline = '';
-    selected[ci].style.boxShadow = '';
-    selected[ci].style.backgroundColor = '';
-    selected[ci].style.borderRadius = '';
-  }
-
-  // 对每个选中元素，提取其直接可见子元素作为候选
-  var candidates = [];
-  for (var si = 0; si < selected.length; si++) {
-    var parent = selected[si];
-    var children = parent.children;
-    for (var chi = 0; chi < children.length; chi++) {
-      var child = children[chi];
-      var tag = child.tagName.toLowerCase();
-      // 跳过不可见和无关元素
-      if ({script:1,style:1,svg:1,noscript:1,iframe:1,canvas:1,video:1,audio:1,template:1,link:1,meta:1}[tag]) continue;
-      var cs = getComputedStyle(child);
-      if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') continue;
-      var text = (child.textContent || '').replace(/\s+/g, ' ').trim();
-      if (text.length < 10) continue;
-      var rect = child.getBoundingClientRect();
-      if (rect.width === 0 || rect.height === 0) continue;
-      candidates.push({
-        el: child,
-        textLen: text.length,
-        area: rect.width * rect.height,
-        density: text.length / Math.max(1, rect.width * rect.height)
-      });
-    }
-  }
-
-  if (candidates.length === 0) return 0;
-
-  // 按文本长度降序排列，保留文本密度最高的前 N 个
-  candidates.sort(function(a, b) { return b.textLen - a.textLen; });
-
-  // 保留文本内容最丰富的前 60%（至少保留 1 个，最多保留 15 个）
-  var keepCount = Math.max(1, Math.min(15, Math.ceil(candidates.length * 0.6)));
-
-  // 注入选中样式（如果不存在）
-  if (!document.getElementById('we-auto-select-style')) {
-    var styleEl = document.createElement('style');
-    styleEl.id = 'we-auto-select-style';
-    styleEl.textContent =
-      "[data-we-selected='true'] {" +
-      "  outline: 3px solid #16a34a !important; outline-offset: 3px !important;" +
-      "  box-shadow: 0 0 0 6px rgba(22,163,74,0.15), 0 0 20px rgba(22,163,74,0.3) !important;" +
-      "  background-color: rgba(22,163,74,0.04) !important; border-radius: 4px !important;" +
-      "}" +
-      "[data-we-selected='true']::before {" +
-      "  content: 'AI \\7F29 \\5C0F \\8303 \\56F4'; position: absolute; top: -32px; left: 4px;" +
-      "  background: #16a34a; color: #fff; font-size: 12px; font-weight: 600;" +
-      "  padding: 2px 10px; border-radius: 4px; z-index: 2147483647;" +
-      "  pointer-events: none; white-space: nowrap;" +
-      "}";
-    document.head.appendChild(styleEl);
-  }
-
-  var newCount = 0;
-  for (var ni = 0; ni < keepCount; ni++) {
-    var c = candidates[ni].el;
-    var pos = getComputedStyle(c).position;
-    if (pos === 'static') c.style.position = 'relative';
-    c.setAttribute(SEL_ATTR, 'true');
-    newCount++;
-  }
-
-  return newCount;
-}
-
-// ================================================================
-// 注入函数：getSelectedElementTexts — 获取选中元素的文本内容
-// 用于缩小重试时根据新元素优化提取指令
-// ================================================================
-
-function getSelectedElementTexts() {
-  var els = document.querySelectorAll('[data-we-selected="true"]');
-  var texts = [];
-  for (var i = 0; i < els.length && i < 30; i++) {
-    var t = (els[i].textContent || '').replace(/\s+/g, ' ').trim();
-    if (t.length > 0) texts.push(t.length > 300 ? t.substring(0, 297) + '...' : t);
-  }
-  return texts;
-}
-
-// ================================================================
-// 注入函数：startNextPagePicker — 让用户手动点击翻页按钮并记录 XPath
-// ================================================================
-
-function startNextPagePicker() {
-  var PICKER_ID = 'we-next-page-picker-style';
-
-  // 清理旧实例
-  var oldStyle = document.getElementById(PICKER_ID);
-  if (oldStyle) oldStyle.remove();
-  var oldToast = document.getElementById('we-picker-toast');
-  if (oldToast) oldToast.remove();
-
-  // 注入样式
-  var style = document.createElement('style');
-  style.id = PICKER_ID;
-  style.textContent = [
-    'body.we-picking-next, body.we-picking-next * { cursor: crosshair !important; }',
-    '.we-picker-hover { outline: 2px dashed #3b82f6 !important; outline-offset: 2px !important; background-color: rgba(59,130,246,0.08) !important; }',
-    '#we-picker-toast { position: fixed !important; bottom: 24px !important; left: 50% !important; transform: translateX(-50%) !important; z-index: 2147483647 !important; background: #1e40af !important; color: #fff !important; padding: 10px 20px !important; border-radius: 10px !important; font-size: 14px !important; font-family: -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif !important; box-shadow: 0 4px 20px rgba(0,0,0,0.3) !important; pointer-events: none !important; }',
-  ].join('\n');
-  document.head.appendChild(style);
-
-  // 提示 toast
-  var toast = document.createElement('div');
-  toast.id = 'we-picker-toast';
-  toast.textContent = '请点击页面上的「下一页」按钮';
-  document.body.appendChild(toast);
-
-  var hoverEl = null;
-
-  function _isSelectable(el) {
-    if (!el || el.nodeType !== 1) return false;
-    var tag = el.tagName.toLowerCase();
-    if (tag === 'html' || tag === 'body') return false;
-    if (tag === 'script' || tag === 'style' || tag === 'svg' || tag === 'path') return false;
-    if (el.id === PICKER_ID || el.id === 'we-picker-toast') return false;
-    return true;
-  }
-
-  function _computeXPath(el) {
-    if (el.id) return '//*[@id="' + el.id.replace(/"/g, '\\"') + '"]';
-    var parts = [];
-    var current = el;
-    while (current && current.nodeType === 1) {
-      var tag = current.nodeName.toLowerCase();
-      var parent = current.parentNode;
-      if (!parent || parent.nodeType !== 1) { parts.unshift(tag); break; }
-      var siblings = [];
-      var childNodes = parent.childNodes;
-      for (var i = 0; i < childNodes.length; i++) {
-        if (childNodes[i].nodeType === 1 && childNodes[i].nodeName === current.nodeName) {
-          siblings.push(childNodes[i]);
-        }
-      }
-      if (siblings.length > 1) {
-        var idx = 1;
-        for (var j = 0; j < siblings.length; j++) {
-          if (siblings[j] === current) { idx = j + 1; break; }
-        }
-        parts.unshift(tag + '[' + idx + ']');
-      } else {
-        parts.unshift(tag);
-      }
-      current = parent;
-    }
-    return '/' + parts.join('/');
-  }
-
-  function cleanup() {
-    document.removeEventListener('mousemove', onMouseMove, true);
-    document.removeEventListener('click', onClick, true);
-    document.removeEventListener('keydown', onKeyDown, true);
-    if (hoverEl) { try { hoverEl.classList.remove('we-picker-hover'); } catch(e) {} hoverEl = null; }
-    var hs = document.querySelectorAll('.we-picker-hover');
-    for (var i = 0; i < hs.length; i++) hs[i].classList.remove('we-picker-hover');
-    document.body.classList.remove('we-picking-next');
-    var st = document.getElementById(PICKER_ID);
-    if (st) st.remove();
-    var tb = document.getElementById('we-picker-toast');
-    if (tb) tb.remove();
-  }
-
-  function onMouseMove(e) {
-    var target = e.target;
-    if (!_isSelectable(target)) return;
-    if (hoverEl !== target) {
-      if (hoverEl) { try { hoverEl.classList.remove('we-picker-hover'); } catch(e) {} }
-      hoverEl = target;
-      try { target.classList.add('we-picker-hover'); } catch(e) {}
-    }
-  }
-
-  function onClick(e) {
-    var target = e.target;
-    if (!_isSelectable(target)) return;
-    e.preventDefault(); e.stopPropagation();
-    var xpath = _computeXPath(target);
-    cleanup();
-    // 存储 XPath 并通知 background 打开 popup
-    chrome.storage.local.set({ customNextPageXPath: xpath, pendingNextPageXPath: xpath }, function() {
-      chrome.runtime.sendMessage({ type: 'nextPageSelected', xpath: xpath });
-    });
-  }
-
-  function onKeyDown(e) {
-    if (e.key === 'Escape') {
-      e.preventDefault();
-      cleanup();
-      // 取消时不传 xpath
-      chrome.storage.local.set({ pendingNextPageXPath: '' }, function() {
-        chrome.runtime.sendMessage({ type: 'nextPageSelected', xpath: '' });
-      });
-    }
-  }
-
-  document.body.classList.add('we-picking-next');
-  document.addEventListener('mousemove', onMouseMove, true);
-  document.addEventListener('click', onClick, true);
-  document.addEventListener('keydown', onKeyDown, true);
-}
-
-// ================================================================
-// 注入函数：detectPaginationOnPage — 检测页面翻页组件
-// ================================================================
-
-function detectPaginationOnPage() {
-  var NEXT_SELECTORS = [
-    'a[rel="next"]',
-    'link[rel="next"]',
-    '[aria-label*="next" i]:not([aria-label*="previous" i])',
-    '[aria-label*="Next" i]:not([aria-label*="Previous" i])',
-    '[aria-label*="下一页"]',
-    '[aria-label*="下一頁"]',
-    '[class*="pagination"] [class*="next"]:not(.disabled)',
-    '[class*="pagination"] a[class*="next"]:not([class*="disabled"])',
-    '[class*="pager"] [class*="next"]:not(.disabled)',
-    '.ant-pagination-next:not(.ant-pagination-disabled)',
-    '.el-pagination button.btn-next:not([disabled])',
-    '.el-pagination .btn-next:not([disabled])',
-    '.t-pagination__btn-next:not(.t-is-disabled)',
-    '.arco-pagination-item-next:not(.arco-pagination-item-disabled)',
-    'nav[aria-label*="pagination" i] a[href]:last-of-type',
-    'nav[aria-label*="分页" i] a[href]:last-of-type',
-    '[data-testid*="next-page"]',
-    '[data-testid*="pagination-next"]',
-    'ul.pagination li.next a:not(.disabled)',
-  ];
-
-  // 尝试 CSS 选择器
-  for (var i = 0; i < NEXT_SELECTORS.length; i++) {
-    try {
-      var els = document.querySelectorAll(NEXT_SELECTORS[i]);
-      for (var j = 0; j < els.length; j++) {
-        var el = els[j];
-        if (!el.offsetParent && el.tagName.toLowerCase() !== 'link') continue;
-        if (el.hasAttribute('disabled')) continue;
-        if (el.getAttribute('aria-disabled') === 'true') continue;
-        var text = (el.textContent || el.getAttribute('aria-label') || '').trim().substring(0, 40);
-        return { found: true, selector: NEXT_SELECTORS[i], tag: el.tagName.toLowerCase(), text: text };
-      }
-    } catch(e) {}
-  }
-
-  // 文本匹配回退
-  var NEXT_TEXTS = ['next', '下一页', '下一頁', '>', '›', '»', 'next page', '下页'];
-  var candidates = document.querySelectorAll('a, button, span[role="button"], div[role="button"]');
-  for (var k = 0; k < candidates.length; k++) {
-    var c = candidates[k];
-    if (!c.offsetParent) continue;
-    if (c.hasAttribute('disabled')) continue;
-    if (c.getAttribute('aria-disabled') === 'true') continue;
-    var ct = (c.textContent || '').trim().toLowerCase();
-    for (var ti = 0; ti < NEXT_TEXTS.length; ti++) {
-      if (ct === NEXT_TEXTS[ti]) {
-        return { found: true, selector: 'text-match', tag: c.tagName.toLowerCase(), text: (c.textContent || '').trim().substring(0, 40) };
-      }
-    }
-  }
-
-  // ---- 回退：检测仅有页码数字（无“下一页”按钮）的分页 ----
-  var pageItemSelectors = [
-    '.ant-pagination-item',
-    '.el-pager li.number',
-    '.el-pager li:not(.active)',
-    'li.page-item:not(.active)',
-    'li[class*="page-item"]',
-    '[class*="pagination"] li:not([class*="next"]):not([class*="prev"]):not([class*="disabled"])',
-    'nav[aria-label*="pagination" i] a[href]',
-    'nav[aria-label*="分页" i] a[href]',
-    '[class*="pager"] li',
-  ];
-
-  for (var si = 0; si < pageItemSelectors.length; si++) {
-    try {
-      var pageItems = document.querySelectorAll(pageItemSelectors[si]);
-      for (var pj = 0; pj < pageItems.length; pj++) {
-        var pi = pageItems[pj];
-        if (!pi.offsetParent) continue;
-        var pit = (pi.textContent || '').trim();
-        if (/^\d+$/.test(pit)) {
-          return { found: true, selector: 'page-number', tag: pi.tagName.toLowerCase(), text: '页码 ' + pit };
-        }
-      }
-    } catch(e) {}
-  }
-
-  return { found: false };
-}
-
-// ================================================================
-// 注入函数：clickNextPageOnPage — 点击翻页按钮
-// 策略：优先点「下一页」按钮，不存在则点具体页码
-// 参数 targetPage: 目标页码（当无下一页按钮时使用）
-// ================================================================
-
-function clickNextPageOnPage(targetPage, customXPath) {
-  // ---- 第零优先：用户指定的自定义 XPath ----
-  if (customXPath && customXPath.length > 0) {
-    try {
-      var result = document.evaluate(customXPath, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
-      var customEl = result.singleNodeValue;
-      if (customEl && customEl.nodeType === 1 && customEl.offsetParent) {
-        customEl.scrollIntoView({ behavior: 'instant', block: 'center' });
-        customEl.click();
-        return { clicked: true, method: 'custom-xpath', xpath: customXPath, text: (customEl.textContent || '').trim().substring(0, 40) };
-      }
-    } catch(e) {}
-  }
-
-  // ---- 第一优先：点击「下一页」按钮 ----
-  var NEXT_SELECTORS = [
-    'a[rel="next"]',
-    '[class*="pagination"] [class*="next"]:not(.disabled)',
-    '[class*="pagination"] a[class*="next"]:not([class*="disabled"])',
-    '.ant-pagination-next:not(.ant-pagination-disabled)',
-    '.el-pagination button.btn-next:not([disabled])',
-    '.el-pagination .btn-next:not([disabled])',
-    '.t-pagination__btn-next:not(.t-is-disabled)',
-    '.arco-pagination-item-next:not(.arco-pagination-item-disabled)',
-    '[aria-label*="next" i]:not([aria-label*="previous" i])',
-    '[aria-label*="下一页"]',
-    '[aria-label*="下一頁"]',
-    'nav[aria-label*="pagination" i] a[href]:last-of-type',
-    'nav[aria-label*="分页" i] a[href]:last-of-type',
-    '[data-testid*="next-page"]',
-    'ul.pagination li.next a:not(.disabled)',
-  ];
-
-  for (var i = 0; i < NEXT_SELECTORS.length; i++) {
-    try {
-      var els = document.querySelectorAll(NEXT_SELECTORS[i]);
-      for (var j = 0; j < els.length; j++) {
-        var el = els[j];
-        if (!el.offsetParent && el.tagName.toLowerCase() !== 'link') continue;
-        if (el.hasAttribute('disabled')) continue;
-        if (el.getAttribute('aria-disabled') === 'true') continue;
-        el.scrollIntoView({ behavior: 'instant', block: 'center' });
-        el.click();
-        return { clicked: true, method: 'next-button', selector: NEXT_SELECTORS[i], text: (el.textContent || '').trim().substring(0, 40) };
-      }
-    } catch(e) {}
-  }
-
-  // 文本匹配回退
-  var NEXT_TEXTS = ['next', '下一页', '下一頁', '>', '›', '»'];
-  var candidates = document.querySelectorAll('a, button');
-  for (var k = 0; k < candidates.length; k++) {
-    var c = candidates[k];
-    if (!c.offsetParent) continue;
-    if (c.hasAttribute('disabled')) continue;
-    var ct = (c.textContent || '').trim().toLowerCase();
-    for (var ti = 0; ti < NEXT_TEXTS.length; ti++) {
-      if (ct === NEXT_TEXTS[ti]) {
-        c.click();
-        return { clicked: true, method: 'next-text', text: c.textContent.trim().substring(0, 40) };
-      }
-    }
-  }
-
-  // ---- 第二优先：点击具体页码 ----
-  if (targetPage !== undefined && targetPage !== null) {
-    var pageNum = String(targetPage);
-    var pageSelectors = [
-      // 主流 UI 框架
-      '.ant-pagination-item-' + pageNum + ' a',
-      '.ant-pagination-item[title="' + pageNum + '"] a',
-      // Element UI: el-pager 下的第 N 个 li
-      // 通用分页结构
-      'li[class*="page"]:not([class*="next"]):not([class*="prev"]) a',
-      'li[class*="number"] a',
-      '.pagination li a',
-      '.pagination a[href]',
-      '[class*="pagination"] a:not([class*="next"]):not([class*="prev"]):not([class*="disabled"])',
-      'nav[aria-label*="pagination" i] a',
-      'nav[aria-label*="分页" i] a',
-      '[class*="pager"] li:not([class*="next"]):not([class*="prev"]) a',
-      '[class*="pager"] a:not([class*="next"]):not([class*="prev"])',
-    ];
-
-    for (var si = 0; si < pageSelectors.length; si++) {
-      try {
-        var pageEls = document.querySelectorAll(pageSelectors[si]);
-        for (var pj = 0; pj < pageEls.length; pj++) {
-          var pe = pageEls[pj];
-          if (!pe.offsetParent) continue;
-          var pt = (pe.textContent || '').trim();
-          // 精确匹配页码
-          if (pt === pageNum || pt === '第' + pageNum + '页') {
-            pe.scrollIntoView({ behavior: 'instant', block: 'center' });
-            pe.click();
-            return { clicked: true, method: 'page-number', text: pt, page: targetPage };
-          }
-        }
-      } catch(e) {}
-    }
-
-    // 通用回退：在所有可见 a/button 中找文本精确等于目标页码的元素
-    var allEls = document.querySelectorAll('a, button, li[class*="page"]');
-    for (var ai = 0; ai < allEls.length; ai++) {
-      var ae = allEls[ai];
-      if (!ae.offsetParent) continue;
-      if (ae.hasAttribute('disabled')) continue;
-      if (ae.closest('[class*="next"]') || ae.closest('[class*="prev"]')) continue;
-      var at = (ae.textContent || '').trim();
-      if (at === pageNum) {
-        // 确认它在分页容器内
-        var inPagination = ae.closest('[class*="pagination"], [class*="pager"], nav[aria-label*="pagination" i], nav[aria-label*="分页" i]');
-        if (inPagination || /^\d+$/.test(at)) {
-          ae.scrollIntoView({ behavior: 'instant', block: 'center' });
-          ae.click();
-          return { clicked: true, method: 'page-number-fallback', text: at, page: targetPage };
-        }
-      }
-    }
-  }
-
-  return { clicked: false };
-}
-
-// ================================================================
 // 多页提取核心逻辑
 // ================================================================
 
@@ -1755,9 +1131,12 @@ async function extractSinglePage(instruction, config) {
  */
 async function waitForPageReady(tabId, prevUrl) {
   var maxWait = 25000;
-  var interval = 600;
+  var pollInterval = 400;
+  var stableThreshold = 3;
   var startTime = Date.now();
 
+  // 先等待 URL 变化型翻页完成
+  var urlChangePhase = true;
   while (Date.now() - startTime < maxWait) {
     try {
       var tab = await chrome.tabs.get(tabId);
@@ -1765,22 +1144,61 @@ async function waitForPageReady(tabId, prevUrl) {
       if (tab.url !== prevUrl) {
         // URL 发生变化 — 传统页面跳转
         if (tab.status === 'complete') {
-          await _sleep(1800); // 额外等待动态内容加载
-          return { ready: true, urlChanged: true };
+          await _sleep(800); // 页面基础渲染完成
+          urlChangePhase = false;
+          break; // 跳出，进入 DOM 稳定检测阶段
         }
       } else if (tab.status === 'complete') {
-        // URL 未变 — AJAX 翻页，等待内容稳定
-        await _sleep(2500);
-        return { ready: true, urlChanged: false };
+        // URL 未变 — AJAX 翻页，直接进入 DOM 稳定检测
+        if (urlChangePhase) {
+          urlChangePhase = false;
+          break;
+        }
       }
-
-      await _sleep(interval);
+      await _sleep(pollInterval);
     } catch(e) {
       return { ready: false, error: e.message };
     }
   }
 
-  return { ready: false, error: '页面加载超时' };
+  if (Date.now() - startTime >= maxWait) {
+    return { ready: false, error: '页面加载超时' };
+  }
+
+  // DOM 稳定检测：轮询页面 body 文本长度，连续 N 次不变则认为内容稳定
+  var prevTextLen = -1;
+  var stableCount = 0;
+  var ajaxTimeout = Date.now() + 15000;
+
+  while (Date.now() < ajaxTimeout) {
+    try {
+      var checkResults = await chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        func: function() {
+          try { return (document.body ? document.body.textContent || '' : '').length; } catch(e) { return -1; }
+        },
+      });
+      var textLen = (checkResults && checkResults[0] && typeof checkResults[0].result === 'number')
+        ? checkResults[0].result : -1;
+
+      if (textLen === prevTextLen && textLen > 0) {
+        stableCount++;
+        if (stableCount >= stableThreshold) {
+          await _sleep(300); // 最后给一点喘息时间
+          return { ready: true, urlChanged: false };
+        }
+      } else {
+        stableCount = 0;
+        prevTextLen = textLen;
+      }
+    } catch(e) {
+      // 注入失败（页面可能还在导航），继续等待
+    }
+    await _sleep(pollInterval);
+  }
+
+  // 超时但页面可能已经稳定，返回 ready
+  return { ready: true, urlChanged: false };
 }
 
 /**
@@ -1837,6 +1255,7 @@ async function handleMultiPageExtract() {
   if (multiPageExtracting) return;
 
   multiPageExtracting = true;
+  console.debug("[popup] handleMultiPageExtract: starting", { pageCount: pageCount, customXPath: !!customNextPageXPath });
   DOM.btnMultiExtract.disabled = true;
   DOM.btnExtract.disabled = true;
   DOM.btnRetryNarrow.disabled = true;

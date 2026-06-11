@@ -4,3 +4,6 @@ test-results/
 .playwright-ext-profile/
 test-output.txt
 e2e-output.txt
+
+# Dependencies
+node_modules/

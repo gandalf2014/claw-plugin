@@ -39,6 +39,37 @@ window._WE.DEBUG = false;
     return s;
   };
 
+  /** 计算元素的 XPath（统一实现，供所有注入函数复用） */
+  WE.getXPath = function(el) {
+    if (!el || el.nodeType !== 1) return null;
+    if (el.id) return '//*[@id="' + el.id.replace(/"/g, '\\"') + '"]';
+    var parts = [];
+    var current = el;
+    while (current && current.nodeType === 1) {
+      var tag = current.nodeName.toLowerCase();
+      var parent = current.parentNode;
+      if (!parent || parent.nodeType !== 1) { parts.unshift(tag); break; }
+      var siblings = [];
+      var childNodes = parent.childNodes;
+      for (var i = 0; i < childNodes.length; i++) {
+        if (childNodes[i].nodeType === 1 && childNodes[i].nodeName === current.nodeName) {
+          siblings.push(childNodes[i]);
+        }
+      }
+      if (siblings.length > 1) {
+        var idx = 1;
+        for (var j = 0; j < siblings.length; j++) {
+          if (siblings[j] === current) { idx = j + 1; break; }
+        }
+        parts.unshift(tag + '[' + idx + ']');
+      } else {
+        parts.unshift(tag);
+      }
+      current = parent;
+    }
+    return '/' + parts.join('/');
+  };
+
   // ================================================================
   // 元素可见性检测
   // ================================================================
@@ -62,6 +93,48 @@ window._WE.DEBUG = false;
     if (el.getAttribute("aria-hidden") === "true") return false;
     if (el.hasAttribute("hidden")) return false;
     return true;
+  };
+
+  /**
+   * 注入选中元素的高亮样式（统一入口，消除重复 CSS 代码）
+   * @param {string} [labelText] - 可选的 ::before 标签文本
+   * @param {boolean} [withPulse] - 是否添加脉冲动画
+   * @param {string} [styleId] - 样式 ID，默认 "we-auto-select-style"
+   */
+  WE.injectSelectionStyles = function(labelText, withPulse, styleId) {
+    styleId = styleId || 'we-auto-select-style';
+    if (document.getElementById(styleId)) return;
+    var css = [
+      "[data-we-selected='true'] {",
+      "  outline: 3px solid #16a34a !important; outline-offset: 3px !important;",
+      "  box-shadow: 0 0 0 6px rgba(22,163,74,0.15), 0 0 20px rgba(22,163,74,0.3) !important;",
+      "  background-color: rgba(22,163,74,0.04) !important; border-radius: 4px !important;",
+      withPulse ? "  animation: we-pulse 2s ease-in-out infinite !important;" : "",
+      "}"
+    ];
+    if (withPulse) {
+      css.push(
+        "@keyframes we-pulse {",
+        "  0%, 100% { box-shadow: 0 0 0 6px rgba(22,163,74,0.15), 0 0 20px rgba(22,163,74,0.3); }",
+        "  50% { box-shadow: 0 0 0 10px rgba(22,163,74,0.08), 0 0 30px rgba(22,163,74,0.5); }",
+        "}"
+      );
+    }
+    if (labelText) {
+      css.push(
+        "[data-we-selected='true']::before {",
+        "  content: '" + labelText + "';",
+        "  position: absolute; top: -32px; left: 4px;",
+        "  background: #16a34a; color: #fff; font-size: 12px; font-weight: 600;",
+        "  padding: 2px 10px; border-radius: 4px; z-index: 2147483647;",
+        "  pointer-events: none; white-space: nowrap;",
+        "}"
+      );
+    }
+    var styleEl = document.createElement('style');
+    styleEl.id = styleId;
+    styleEl.textContent = css.join('\n');
+    try { document.head.appendChild(styleEl); } catch(e) {}
   };
 
   // ================================================================

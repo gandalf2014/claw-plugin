@@ -123,12 +123,28 @@ async function handleLLMCall(request, sender) {
   var modelName = config.modelName;
   var systemPrompt = config.systemPrompt;
 
-  // 获取当前页面 URL（用于上下文）
+  // 获取当前页面 URL（用于上下文），过滤敏感查询参数
   var pageUrl = "";
   if (sender && sender.tab) {
     try {
       var tab = await chrome.tabs.get(sender.tab.id);
-      pageUrl = tab.url || "";
+      var rawUrl = tab.url || "";
+      try {
+        var urlObj = new URL(rawUrl);
+        // 剔除敏感查询参数，防止 token/key/密码等泄露到 LLM API
+        var sensitiveParams = /^(token|key|secret|password|passwd|auth|session|sid|access_token|api_key|apikey|sign|signature|credential|jwt)$/i;
+        var params = urlObj.searchParams;
+        var keysToDelete = [];
+        params.forEach(function(_, k) {
+          if (sensitiveParams.test(k)) keysToDelete.push(k);
+        });
+        for (var i = 0; i < keysToDelete.length; i++) {
+          params.delete(keysToDelete[i]);
+        }
+        pageUrl = urlObj.origin + urlObj.pathname + (urlObj.search ? '?' + params.toString() : '') + urlObj.hash;
+      } catch(_) {
+        pageUrl = rawUrl; // URL 解析失败则用原值
+      }
     } catch (_) { /* 忽略 */ }
   }
 
@@ -235,7 +251,7 @@ async function handleLLMCall(request, sender) {
       if (isRetryableError(response.status) && attempt < RETRY_MAX - 1) {
         // 可重试错误：等待后重试
         var delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
-        _bgLog("[Background] Retry attempt " + (attempt + 1) + " after " + delay + "ms, status: " + response.status);
+        console.debug("[Background] API retry " + (attempt + 1) + "/" + RETRY_MAX + " after " + delay + "ms, status: " + response.status);
         await sleep(delay);
         continue;
       }
